@@ -1,0 +1,2 @@
+/usr/bin/ar qc libcpcbf_common.a CMakeFiles/cpcbf_common.dir/common/benchmark_packet.c.o CMakeFiles/cpcbf_common.dir/common/test_engine.c.o
+/usr/bin/ranlib libcpcbf_common.a

@@ -1,0 +1,372 @@
+/*
+ * CPCBF — Test Engine Implementation
+ */
+#include "test_engine.h"
+#include "benchmark_packet.h"
+#include "platform_hal.h"
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+
+test_results_t *test_results_alloc(uint32_t max_packets)
+{
+    size_t sz = sizeof(test_results_t) + max_packets * sizeof(packet_result_t);
+    test_results_t *r = calloc(1, sz);
+    return r;
+}
+
+void test_results_free(test_results_t *r)
+{
+    free(r);
+}
+
+/* ---- Ping-pong sender ---- */
+
+static void run_ping_pong_sender(protocol_adapter_t *adapter,
+                                 const test_config_t *cfg,
+                                 test_results_t *res)
+{
+    uint32_t total = cfg->warmup + cfg->repetitions;
+    uint8_t tx_buf[BENCH_MAX_PAYLOAD + BENCH_OVERHEAD];
+    uint8_t rx_buf[BENCH_MAX_PAYLOAD + BENCH_OVERHEAD];
+    bench_packet_t pkt;
+
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.msg_type = MSG_PING;
+
+    /* Fill payload with a repeating pattern */
+    for (uint16_t i = 0; i < cfg->payload_size; i++)
+        pkt.payload[i] = (uint8_t)(i & 0xFF);
+    pkt.payload_len = cfg->payload_size;
+
+    for (uint32_t i = 0; i < total; i++) {
+        pkt.seq_num = (uint16_t)(i & 0xFFFF);
+        pkt.timestamp = platform_timestamp_us();
+
+        int enc_len = bench_packet_encode(&pkt, tx_buf, sizeof(tx_buf));
+        if (enc_len < 0) {
+            platform_log("encode error seq=%u", i);
+            continue;
+        }
+
+        uint32_t tx_us = platform_timestamp_us();
+        int rc = adapter->send(adapter, tx_buf, (size_t)enc_len);
+        res->packets_sent++;
+
+        packet_result_t *pr = &res->results[res->result_count];
+        pr->seq = pkt.seq_num;
+        pr->tx_us = tx_us;
+        pr->is_warmup = (i < cfg->warmup) ? 1 : 0;
+
+        if (rc != ADAPTER_OK) {
+            pr->lost = 1;
+            res->packets_lost++;
+            res->result_count++;
+            continue;
+        }
+
+        /* Wait for PONG */
+        size_t rx_len = 0;
+        rc = adapter->recv(adapter, rx_buf, sizeof(rx_buf), &rx_len, cfg->timeout_ms);
+        uint32_t rx_us = platform_timestamp_us();
+
+        if (rc == ADAPTER_ERR_TIMEOUT || rc == ADAPTER_ERR_RECV) {
+            pr->lost = 1;
+            res->packets_lost++;
+            res->result_count++;
+            continue;
+        }
+
+        bench_packet_t rpkt;
+        int dec_rc = bench_packet_decode(rx_buf, rx_len, &rpkt);
+        if (dec_rc == -2) {
+            pr->crc_ok = 0;
+            res->crc_errors++;
+        } else if (dec_rc == 0) {
+            pr->crc_ok = 1;
+        } else {
+            pr->lost = 1;
+            res->packets_lost++;
+            res->result_count++;
+            continue;
+        }
+
+        pr->rx_us = rx_us;
+        pr->rtt_us = rx_us - tx_us;
+        res->packets_received++;
+
+        int rssi;
+        if (adapter->get_rssi(adapter, &rssi) == ADAPTER_OK)
+            pr->rssi = rssi;
+
+        res->result_count++;
+    }
+}
+
+/* ---- Ping-pong receiver ---- */
+
+static void run_ping_pong_receiver(protocol_adapter_t *adapter,
+                                   const test_config_t *cfg,
+                                   test_results_t *res)
+{
+    uint32_t total = cfg->warmup + cfg->repetitions;
+    uint8_t rx_buf[BENCH_MAX_PAYLOAD + BENCH_OVERHEAD];
+    uint8_t tx_buf[BENCH_MAX_PAYLOAD + BENCH_OVERHEAD];
+
+    for (uint32_t i = 0; i < total; i++) {
+        size_t rx_len = 0;
+        int rc = adapter->recv(adapter, rx_buf, sizeof(rx_buf), &rx_len, cfg->timeout_ms);
+        uint32_t rx_us = platform_timestamp_us();
+
+        packet_result_t *pr = &res->results[res->result_count];
+        pr->seq = (uint16_t)(i & 0xFFFF);
+        pr->rx_us = rx_us;
+        pr->is_warmup = (i < cfg->warmup) ? 1 : 0;
+
+        if (rc == ADAPTER_ERR_TIMEOUT || rc == ADAPTER_ERR_RECV) {
+            pr->lost = 1;
+            res->packets_lost++;
+            res->result_count++;
+            continue;
+        }
+
+        bench_packet_t pkt;
+        int dec_rc = bench_packet_decode(rx_buf, rx_len, &pkt);
+        if (dec_rc == -2) {
+            pr->crc_ok = 0;
+            res->crc_errors++;
+        } else if (dec_rc == 0) {
+            pr->crc_ok = 1;
+        } else {
+            pr->lost = 1;
+            res->packets_lost++;
+            res->result_count++;
+            continue;
+        }
+
+        res->packets_received++;
+
+        int rssi;
+        if (adapter->get_rssi(adapter, &rssi) == ADAPTER_OK)
+            pr->rssi = rssi;
+
+        /* Build and send PONG */
+        pkt.msg_type = MSG_PONG;
+        pkt.timestamp = platform_timestamp_us();
+        int enc_len = bench_packet_encode(&pkt, tx_buf, sizeof(tx_buf));
+        if (enc_len > 0) {
+            adapter->send(adapter, tx_buf, (size_t)enc_len);
+            res->packets_sent++;
+        }
+
+        pr->tx_us = pkt.timestamp;
+        res->result_count++;
+    }
+}
+
+/* ---- Flood sender ---- */
+
+static void run_flood_sender(protocol_adapter_t *adapter,
+                             const test_config_t *cfg,
+                             test_results_t *res)
+{
+    uint32_t total = cfg->warmup + cfg->repetitions;
+    uint8_t tx_buf[BENCH_MAX_PAYLOAD + BENCH_OVERHEAD];
+    bench_packet_t pkt;
+
+    memset(&pkt, 0, sizeof(pkt));
+    pkt.msg_type = MSG_FLOOD;
+    for (uint16_t i = 0; i < cfg->payload_size; i++)
+        pkt.payload[i] = (uint8_t)(i & 0xFF);
+    pkt.payload_len = cfg->payload_size;
+
+    for (uint32_t i = 0; i < total; i++) {
+        pkt.seq_num = (uint16_t)(i & 0xFFFF);
+        pkt.timestamp = platform_timestamp_us();
+
+        int enc_len = bench_packet_encode(&pkt, tx_buf, sizeof(tx_buf));
+        if (enc_len < 0)
+            continue;
+
+        uint32_t tx_us = platform_timestamp_us();
+        int rc = adapter->send(adapter, tx_buf, (size_t)enc_len);
+        res->packets_sent++;
+
+        packet_result_t *pr = &res->results[res->result_count];
+        pr->seq = pkt.seq_num;
+        pr->tx_us = tx_us;
+        pr->is_warmup = (i < cfg->warmup) ? 1 : 0;
+        pr->lost = (rc != ADAPTER_OK) ? 1 : 0;
+        if (pr->lost)
+            res->packets_lost++;
+
+        res->result_count++;
+
+        if (cfg->inter_packet_us > 0)
+            platform_sleep_ms(cfg->inter_packet_us / 1000);
+    }
+}
+
+/* ---- Flood receiver ---- */
+
+static void run_flood_receiver(protocol_adapter_t *adapter,
+                               const test_config_t *cfg,
+                               test_results_t *res)
+{
+    uint32_t total = cfg->warmup + cfg->repetitions;
+    uint8_t rx_buf[BENCH_MAX_PAYLOAD + BENCH_OVERHEAD];
+    uint32_t expected_seq = 0;
+
+    for (uint32_t i = 0; i < total; i++) {
+        size_t rx_len = 0;
+        int rc = adapter->recv(adapter, rx_buf, sizeof(rx_buf), &rx_len, cfg->timeout_ms);
+        uint32_t rx_us = platform_timestamp_us();
+
+        packet_result_t *pr = &res->results[res->result_count];
+        pr->is_warmup = (i < cfg->warmup) ? 1 : 0;
+
+        if (rc == ADAPTER_ERR_TIMEOUT || rc == ADAPTER_ERR_RECV) {
+            pr->seq = (uint16_t)(expected_seq & 0xFFFF);
+            pr->lost = 1;
+            res->packets_lost++;
+            expected_seq++;
+            res->result_count++;
+            continue;
+        }
+
+        bench_packet_t pkt;
+        int dec_rc = bench_packet_decode(rx_buf, rx_len, &pkt);
+        if (dec_rc == -2) {
+            pr->crc_ok = 0;
+            res->crc_errors++;
+        } else if (dec_rc == 0) {
+            pr->crc_ok = 1;
+            pr->seq = pkt.seq_num;
+        } else {
+            pr->lost = 1;
+            res->packets_lost++;
+            res->result_count++;
+            continue;
+        }
+
+        pr->rx_us = rx_us;
+        res->packets_received++;
+        expected_seq = pkt.seq_num + 1;
+
+        int rssi;
+        if (adapter->get_rssi(adapter, &rssi) == ADAPTER_OK)
+            pr->rssi = rssi;
+
+        res->result_count++;
+    }
+
+    /* Send FLOOD_ACK summary */
+    uint8_t tx_buf[BENCH_OVERHEAD];
+    bench_packet_t ack;
+    memset(&ack, 0, sizeof(ack));
+    ack.msg_type = MSG_FLOOD_ACK;
+    ack.seq_num = (uint16_t)(res->packets_received & 0xFFFF);
+    ack.timestamp = platform_timestamp_us();
+    ack.payload_len = 0;
+    int enc_len = bench_packet_encode(&ack, tx_buf, sizeof(tx_buf));
+    if (enc_len > 0)
+        adapter->send(adapter, tx_buf, (size_t)enc_len);
+}
+
+/* ---- Public API ---- */
+
+test_results_t *test_engine_run(protocol_adapter_t *adapter,
+                                const test_config_t *cfg)
+{
+    if (!adapter || !cfg)
+        return NULL;
+
+    uint32_t total = cfg->warmup + cfg->repetitions;
+    test_results_t *res = test_results_alloc(total);
+    if (!res)
+        return NULL;
+
+    res->warmup_count = cfg->warmup;
+
+    switch (cfg->mode) {
+    case TEST_MODE_PING_PONG:
+        if (cfg->role == ROLE_SENDER)
+            run_ping_pong_sender(adapter, cfg, res);
+        else
+            run_ping_pong_receiver(adapter, cfg, res);
+        break;
+    case TEST_MODE_FLOOD:
+        if (cfg->role == ROLE_SENDER)
+            run_flood_sender(adapter, cfg, res);
+        else
+            run_flood_receiver(adapter, cfg, res);
+        break;
+    default:
+        test_results_free(res);
+        return NULL;
+    }
+
+    return res;
+}
+
+/* ---- JSON serialization (snprintf-based) ---- */
+
+char *test_results_to_json(const test_results_t *results,
+                           const test_config_t *cfg)
+{
+    if (!results || !cfg)
+        return NULL;
+
+    /* Estimate buffer size: ~120 bytes per packet + 512 for metadata */
+    size_t buf_size = 512 + results->result_count * 128;
+    char *buf = malloc(buf_size);
+    if (!buf)
+        return NULL;
+
+    int off = 0;
+    off += snprintf(buf + off, buf_size - off,
+        "{\n"
+        "  \"mode\": \"%s\",\n"
+        "  \"role\": \"%s\",\n"
+        "  \"payload_size\": %u,\n"
+        "  \"repetitions\": %u,\n"
+        "  \"warmup\": %u,\n"
+        "  \"packets_sent\": %u,\n"
+        "  \"packets_received\": %u,\n"
+        "  \"packets_lost\": %u,\n"
+        "  \"crc_errors\": %u,\n"
+        "  \"packets\": [\n",
+        cfg->mode == TEST_MODE_PING_PONG ? "ping_pong" : "flood",
+        cfg->role == ROLE_SENDER ? "sender" : "receiver",
+        cfg->payload_size,
+        cfg->repetitions,
+        cfg->warmup,
+        results->packets_sent,
+        results->packets_received,
+        results->packets_lost,
+        results->crc_errors);
+
+    for (uint32_t i = 0; i < results->result_count; i++) {
+        const packet_result_t *p = &results->results[i];
+
+        /* Grow buffer if needed */
+        if ((size_t)(off + 256) >= buf_size) {
+            buf_size *= 2;
+            char *nb = realloc(buf, buf_size);
+            if (!nb) { free(buf); return NULL; }
+            buf = nb;
+        }
+
+        off += snprintf(buf + off, buf_size - off,
+            "    {\"seq\": %u, \"tx_us\": %u, \"rx_us\": %u, "
+            "\"rtt_us\": %u, \"rssi\": %d, \"crc_ok\": %u, "
+            "\"lost\": %u, \"warmup\": %u}%s\n",
+            p->seq, p->tx_us, p->rx_us,
+            p->rtt_us, p->rssi, p->crc_ok,
+            p->lost, p->is_warmup,
+            (i + 1 < results->result_count) ? "," : "");
+    }
+
+    off += snprintf(buf + off, buf_size - off, "  ]\n}\n");
+    return buf;
+}

@@ -1,0 +1,16 @@
+global:
+  repetitions: 100
+  warmup: 5
+  timeout_ms: 5000
+  inter_packet_us: 0
+  port: 5201
+  channel: 2437
+  topology: p2p
+  cooldown_s: 5
+
+tests:
+  - name: wifi_rpi4_rtt
+    mode: ping_pong
+    protocol: wifi
+    board: rpi4
+    payload_sizes: [32, 128, 512, 1024, 4096]

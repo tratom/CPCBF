@@ -1,0 +1,16 @@
+global:
+  repetitions: 30
+  warmup: 3
+  timeout_ms: 5000
+  inter_packet_us: 0
+  port: 5201
+  channel: 2437
+  topology: p2p
+  cooldown_s: 2
+
+tests:
+  - name: wifi_rpi4_smoke
+    mode: ping_pong
+    protocol: wifi
+    board: rpi4
+    payload_sizes: [128]
