@@ -16,6 +16,15 @@ from .radio_isolation import RadioIsolation
 logger = logging.getLogger(__name__)
 
 
+def _wifi_mac_to_p2p_addr(mac: str) -> str:
+    """Convert a WiFi MAC to its P2P device address (set locally-administered bit)."""
+    octets = mac.split(":")
+    first_byte = int(octets[0], 16)
+    first_byte |= 0x02  # set locally-administered bit
+    octets[0] = f"{first_byte:02x}"
+    return ":".join(octets)
+
+
 class Orchestrator:
     """Runs all tests in a plan against a pair of agents."""
 
@@ -44,7 +53,7 @@ class Orchestrator:
         return {
             "iface_name": "wlan0",
             "peer_addr": peer_ip,
-            "peer_mac": self.hosts[peer_id].wifi_mac,
+            "peer_mac": _wifi_mac_to_p2p_addr(self.hosts[peer_id].wifi_mac),
             "port": test.port,
             "channel": test.channel,
             "essid": "CPCBF_TEST",
@@ -111,7 +120,7 @@ class Orchestrator:
         # 4. Set up Wi-Fi link: GO (sender) first, then client (receiver)
         logger.info("Setting up Wi-Fi on sender (GO)...")
         resp = manager.send(
-            sender_id, {"command": "WIFI_SETUP"}, timeout=30.0
+            sender_id, {"command": "WIFI_SETUP"}, timeout=60.0
         )
         if resp.get("status") != "ok":
             logger.error("Sender Wi-Fi setup failed: %s", resp)
@@ -119,7 +128,7 @@ class Orchestrator:
 
         logger.info("Setting up Wi-Fi on receiver (client)...")
         resp = manager.send(
-            receiver_id, {"command": "WIFI_SETUP"}, timeout=30.0
+            receiver_id, {"command": "WIFI_SETUP"}, timeout=120.0
         )
         if resp.get("status") != "ok":
             logger.error("Receiver Wi-Fi setup failed: %s", resp)

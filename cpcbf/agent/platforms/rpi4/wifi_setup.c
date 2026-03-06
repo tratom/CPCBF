@@ -1,8 +1,8 @@
 /*
- * CPCBF — Wi-Fi Setup Implementation for RPi4
+ * CPCBF — Wi-Fi Direct Setup for RPi4
  *
- * Assumes wpa_supplicant is managed by systemd (Bookworm+ default).
- * Uses wpa_cli for P2P operations against the running instance.
+ * Based on tested working scripts from Iot-Experiment-Runner.
+ * Stops NetworkManager, starts own wpa_supplicant, uses P2P.
  */
 #include "wifi_setup.h"
 #include "platform_hal.h"
@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <sys/stat.h>
 
 /* Run a shell command with stdout redirected to stderr (keep stdout clean for JSON). */
 static int run_cmd(const char *cmd)
@@ -33,117 +34,169 @@ static int run_cmd_output(const char *cmd, char *out, size_t out_len)
         return -1;
     }
     pclose(fp);
-    /* Strip trailing newline */
     size_t len = strlen(out);
     if (len > 0 && out[len - 1] == '\n')
         out[len - 1] = '\0';
     return 0;
 }
 
-/* Wait for an interface to appear (up to timeout_s seconds). */
-static int wait_for_iface(const char *prefix, int timeout_s,
-                          char *iface_out, size_t iface_out_len)
+/* Wait for p2p-wlan0-* interface to appear. */
+static int wait_for_iface(int timeout_s, char *iface_out, size_t iface_out_len)
 {
-    char cmd[256];
-    for (int i = 0; i < timeout_s * 2; i++) {
-        snprintf(cmd, sizeof(cmd),
-            "ls /sys/class/net/ | grep '^%s' | head -1", prefix);
-        if (run_cmd_output(cmd, iface_out, iface_out_len) == 0 &&
-            strlen(iface_out) > 0)
+    for (int i = 0; i < timeout_s; i++) {
+        if (run_cmd_output(
+                "ls /sys/class/net/ | grep '^p2p-wlan0' | head -1",
+                iface_out, iface_out_len) == 0 &&
+            strlen(iface_out) > 0) {
+            platform_log("P2P interface appeared: %s (after %ds)", iface_out, i);
             return 0;
-        usleep(500000);
+        }
+        sleep(1);
     }
     return -1;
 }
 
-/* Wait until wpa_cli can connect to wlan0 (up to timeout_s seconds). */
-static int wait_for_wpa_cli(int timeout_s)
+/* Ensure minimal wpa_supplicant.conf exists. */
+static void ensure_wpa_conf(void)
 {
-    for (int i = 0; i < timeout_s * 2; i++) {
-        int rc = system("wpa_cli -i wlan0 status >/dev/null 2>&1");
-        if (rc == 0) {
-            platform_log("wpa_cli ready after %d ms", i * 500);
-            return 0;
-        }
-        usleep(500000);
+    struct stat st;
+    if (stat("/etc/wpa_supplicant/wpa_supplicant.conf", &st) == 0)
+        return; /* already exists */
+
+    run_cmd("mkdir -p /etc/wpa_supplicant");
+    FILE *fp = fopen("/etc/wpa_supplicant/wpa_supplicant.conf", "w");
+    if (fp) {
+        fprintf(fp,
+            "ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev\n"
+            "update_config=1\n"
+            "device_name=CPCBF\n"
+            "device_type=1-0050F204-1\n"
+            "p2p_go_intent=15\n");
+        fclose(fp);
+        platform_log("Created minimal wpa_supplicant.conf");
     }
-    return -1;
 }
 
-/* Clean up any existing P2P groups. */
-static void cleanup_p2p(void)
+/* Clean up: kill wpa_supplicant, stop NetworkManager */
+static void full_cleanup(void)
 {
-    /* Stop any ongoing P2P operations */
-    run_cmd("wpa_cli -i wlan0 p2p_stop_find 2>/dev/null");
-    run_cmd("wpa_cli -i wlan0 p2p_flush 2>/dev/null");
-    /* Remove all P2P groups */
-    run_cmd("wpa_cli -i wlan0 p2p_group_remove \"*\" 2>/dev/null");
-    platform_sleep_ms(1000);
+    run_cmd("pkill -9 wpa_supplicant 2>/dev/null");
+    sleep(2);
+    run_cmd("systemctl stop NetworkManager 2>/dev/null");
+    run_cmd("rfkill unblock wifi 2>/dev/null");
+    run_cmd("ip link set wlan0 up 2>/dev/null");
+    sleep(1);
 }
 
-/* ---- Wi-Fi Direct (P2P) ---- */
-
-static int setup_p2p(const adapter_config_t *cfg,
-                     char *iface_out, size_t iface_out_len)
+/* Start our own wpa_supplicant and wait for it. */
+static int start_wpa_supplicant(void)
 {
-    cleanup_p2p();
+    ensure_wpa_conf();
+    run_cmd("wpa_supplicant -B -i wlan0 "
+            "-c /etc/wpa_supplicant/wpa_supplicant.conf");
+    sleep(3);
 
-    if (cfg->role == ROLE_SENDER) {
-        /* GO role: create P2P group */
-        char ch_cmd[128];
-        snprintf(ch_cmd, sizeof(ch_cmd),
-            "wpa_cli -i wlan0 p2p_group_add freq=%d",
-            cfg->channel > 0 ? cfg->channel : 2437);
-        if (run_cmd(ch_cmd) != 0) {
-            platform_log("p2p_group_add failed");
-            return -1;
-        }
-        platform_sleep_ms(2000);
+    /* Verify it's running */
+    int rc = system("wpa_cli -i wlan0 status >/dev/null 2>&1");
+    if (rc != 0) {
+        platform_log("wpa_supplicant failed to start");
+        return -1;
+    }
+    platform_log("wpa_supplicant ready");
+    return 0;
+}
 
-        if (wait_for_iface("p2p-wlan0", 10, iface_out, iface_out_len) != 0) {
-            platform_log("P2P group interface did not appear");
-            return -1;
-        }
+/* ---- Wi-Fi Direct (P2P) — GO role ---- */
 
-        /* Assign IP (CIDR notation) */
-        char ip_cmd[128];
-        snprintf(ip_cmd, sizeof(ip_cmd),
-            "ip addr add %s/24 dev %s 2>/dev/null; ip link set %s up",
-            cfg->local_ip, iface_out, iface_out);
-        run_cmd(ip_cmd);
+static int setup_p2p_go(const adapter_config_t *cfg,
+                        char *iface_out, size_t iface_out_len)
+{
+    full_cleanup();
+    if (start_wpa_supplicant() != 0)
+        return -1;
 
-        /* Enable WPS push button for client connection */
-        char wps_cmd[128];
-        snprintf(wps_cmd, sizeof(wps_cmd),
-            "wpa_cli -i %s wps_pbc", iface_out);
-        run_cmd(wps_cmd);  /* non-fatal if it fails */
+    /* Create P2P group (become GO) */
+    run_cmd("wpa_cli -i wlan0 p2p_group_add");
 
-    } else {
-        /* Client role: find and connect to GO */
-        run_cmd("wpa_cli -i wlan0 p2p_find");
-        platform_sleep_ms(5000);  /* give time to discover the GO */
-
-        char connect_cmd[256];
-        snprintf(connect_cmd, sizeof(connect_cmd),
-            "wpa_cli -i wlan0 p2p_connect %s pbc join", cfg->peer_mac);
-        if (run_cmd(connect_cmd) != 0) {
-            platform_log("p2p_connect failed");
-            return -1;
-        }
-
-        if (wait_for_iface("p2p-wlan0", 20, iface_out, iface_out_len) != 0) {
-            platform_log("P2P client interface did not appear");
-            return -1;
-        }
-
-        char ip_cmd[128];
-        snprintf(ip_cmd, sizeof(ip_cmd),
-            "ip addr add %s/24 dev %s 2>/dev/null; ip link set %s up",
-            cfg->local_ip, iface_out, iface_out);
-        run_cmd(ip_cmd);
+    /* Wait for p2p-wlan0-0 interface */
+    if (wait_for_iface(20, iface_out, iface_out_len) != 0) {
+        platform_log("P2P group interface did not appear");
+        return -1;
     }
 
-    platform_log("P2P interface ready: %s", iface_out);
+    /* Assign IP */
+    char ip_cmd[256];
+    snprintf(ip_cmd, sizeof(ip_cmd),
+        "ip addr add %s/24 dev %s; ip link set %s up",
+        cfg->local_ip, iface_out, iface_out);
+    run_cmd(ip_cmd);
+
+    /* Open WPS push button for client */
+    char wps_cmd[128];
+    snprintf(wps_cmd, sizeof(wps_cmd), "wpa_cli -i %s wps_pbc", iface_out);
+    run_cmd(wps_cmd);
+
+    platform_log("GO ready on %s with IP %s", iface_out, cfg->local_ip);
+    return 0;
+}
+
+/* ---- Wi-Fi Direct (P2P) — Client role ---- */
+
+static int setup_p2p_client(const adapter_config_t *cfg,
+                            char *iface_out, size_t iface_out_len)
+{
+    full_cleanup();
+    if (start_wpa_supplicant() != 0)
+        return -1;
+
+    /* Discover peers */
+    run_cmd("wpa_cli -i wlan0 p2p_flush");
+    run_cmd("wpa_cli -i wlan0 p2p_find");
+    platform_log("Scanning for GO (10s)...");
+    sleep(10);
+
+    /* Connect to GO using peer MAC */
+    char connect_cmd[256];
+    snprintf(connect_cmd, sizeof(connect_cmd),
+        "wpa_cli -i wlan0 p2p_connect %s pbc join", cfg->peer_mac);
+    run_cmd(connect_cmd);
+
+    /* Wait for p2p-wlan0-0 interface (up to 60s, retry at 20s) */
+    int found = 0;
+    for (int i = 0; i < 60; i++) {
+        if (run_cmd_output(
+                "ls /sys/class/net/ | grep '^p2p-wlan0' | head -1",
+                iface_out, iface_out_len) == 0 &&
+            strlen(iface_out) > 0) {
+            platform_log("P2P client interface appeared: %s (after %ds)", iface_out, i);
+            found = 1;
+            break;
+        }
+        /* Retry connection at the 20s mark */
+        if (i == 20) {
+            platform_log("Retrying p2p_connect...");
+            run_cmd(connect_cmd);
+        }
+        sleep(1);
+    }
+
+    if (!found) {
+        platform_log("P2P client interface did not appear after 60s");
+        return -1;
+    }
+
+    /* Assign IP */
+    char ip_cmd[256];
+    snprintf(ip_cmd, sizeof(ip_cmd),
+        "ip addr add %s/24 dev %s; ip link set %s up",
+        cfg->local_ip, iface_out, iface_out);
+    run_cmd(ip_cmd);
+
+    /* Wait for link stabilization */
+    platform_log("Waiting 5s for link stabilization...");
+    sleep(5);
+
+    platform_log("Client ready on %s with IP %s", iface_out, cfg->local_ip);
     return 0;
 }
 
@@ -152,10 +205,7 @@ static int setup_p2p(const adapter_config_t *cfg,
 static int setup_adhoc(const adapter_config_t *cfg,
                        char *iface_out, size_t iface_out_len)
 {
-    /* For ad-hoc, we do need to stop wpa_supplicant to change interface type */
-    run_cmd("systemctl stop wpa_supplicant 2>/dev/null");
-    run_cmd("killall dhcpcd 2>/dev/null");
-    platform_sleep_ms(500);
+    full_cleanup();
 
     run_cmd("ip link set wlan0 down");
     run_cmd("iw dev wlan0 set type ibss");
@@ -173,8 +223,7 @@ static int setup_adhoc(const adapter_config_t *cfg,
 
     char ip_cmd[128];
     snprintf(ip_cmd, sizeof(ip_cmd),
-        "ip addr add %s/24 dev wlan0 2>/dev/null",
-        cfg->local_ip);
+        "ip addr add %s/24 dev wlan0 2>/dev/null", cfg->local_ip);
     run_cmd(ip_cmd);
 
     snprintf(iface_out, iface_out_len, "wlan0");
@@ -188,16 +237,18 @@ int wifi_setup(const adapter_config_t *cfg, char *iface_out, size_t iface_out_le
 {
     if (cfg->topology == TOPO_ADHOC)
         return setup_adhoc(cfg, iface_out, iface_out_len);
+
+    if (cfg->role == ROLE_SENDER)
+        return setup_p2p_go(cfg, iface_out, iface_out_len);
     else
-        return setup_p2p(cfg, iface_out, iface_out_len);
+        return setup_p2p_client(cfg, iface_out, iface_out_len);
 }
 
 int wifi_teardown(const adapter_config_t *cfg)
 {
     (void)cfg;
-    /* Stop P2P operations and remove all groups */
-    run_cmd("wpa_cli -i wlan0 p2p_stop_find 2>/dev/null");
-    run_cmd("wpa_cli -i wlan0 p2p_flush 2>/dev/null");
-    run_cmd("wpa_cli -i wlan0 p2p_group_remove \"*\" 2>/dev/null");
+    run_cmd("pkill -9 wpa_supplicant 2>/dev/null");
+    sleep(2);
+    run_cmd("systemctl start NetworkManager 2>/dev/null");
     return 0;
 }
