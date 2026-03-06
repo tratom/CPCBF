@@ -1,1 +1,0 @@
-/usr/bin/cc CMakeFiles/test_packet_codec.dir/tests/test_packet_codec.c.o -o test_packet_codec  libcpcbf_common.a 
