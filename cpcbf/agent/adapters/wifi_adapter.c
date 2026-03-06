@@ -117,27 +117,27 @@ static int wifi_recv(protocol_adapter_t *self, uint8_t *buf, size_t buf_len,
 static int wifi_get_rssi(protocol_adapter_t *self, int *rssi_dbm)
 {
     wifi_priv_t *priv = self->priv;
-    char path[128];
-    snprintf(path, sizeof(path), "/proc/net/wireless");
 
-    FILE *fp = fopen(path, "r");
+    /* Use wpa_cli signal_poll on the P2P interface */
+    char cmd[128];
+    snprintf(cmd, sizeof(cmd),
+        "wpa_cli -i %s signal_poll 2>/dev/null | grep '^RSSI=' | cut -d= -f2",
+        priv->active_iface);
+
+    FILE *fp = popen(cmd, "r");
     if (!fp)
         return ADAPTER_ERR_RSSI;
 
-    char line[256];
+    char line[64];
     int found = 0;
-    while (fgets(line, sizeof(line), fp)) {
-        if (strstr(line, priv->active_iface)) {
-            /* Format: "iface: status link level noise ..." */
-            int level;
-            if (sscanf(line, "%*s %*d %*d %d", &level) == 1) {
-                *rssi_dbm = level;
-                found = 1;
-            }
-            break;
+    if (fgets(line, sizeof(line), fp)) {
+        int val = atoi(line);
+        if (val != 0) { /* atoi returns 0 on failure, but RSSI is always negative */
+            *rssi_dbm = val;
+            found = 1;
         }
     }
-    fclose(fp);
+    pclose(fp);
 
     return found ? ADAPTER_OK : ADAPTER_ERR_RSSI;
 }

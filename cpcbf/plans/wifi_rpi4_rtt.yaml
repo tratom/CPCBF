@@ -13,4 +13,7 @@ tests:
     mode: ping_pong
     protocol: wifi
     board: rpi4
-    payload_sizes: [32, 128, 512, 1024, 4096]
+    payload_sizes: [32, 128, 512, 1024, 4096, 8192]
+
+
+# total exec time 6 min

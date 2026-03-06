@@ -95,7 +95,7 @@ def plot_throughput_bar(db_path: str, output_path: str | Path) -> None:
 
 
 def plot_loss_bar(db_path: str, output_path: str | Path) -> None:
-    """Packet loss % by payload size."""
+    """Packet loss % by payload size, grouped by mode."""
     from .stats import compute_all_stats
 
     stats_df = compute_all_stats(db_path)
@@ -104,14 +104,28 @@ def plot_loss_bar(db_path: str, output_path: str | Path) -> None:
         return
 
     fig, ax = plt.subplots(figsize=(10, 6))
-    ax.bar(
-        stats_df["payload_size"].astype(str),
-        stats_df["packet_loss_pct"],
-        color=sns.color_palette()[1],
-    )
-    ax.set_xlabel("Payload Size (bytes)")
+
+    modes = stats_df["mode"].unique()
+    x_positions = range(len(stats_df))
+    labels = [f"{int(row['payload_size'])}B\n({row['mode']})"
+              for _, row in stats_df.sort_values(["mode", "payload_size"]).iterrows()]
+    values = stats_df.sort_values(["mode", "payload_size"])["packet_loss_pct"].values
+
+    colors = [sns.color_palette()[0] if m == "ping_pong" else sns.color_palette()[1]
+              for m in stats_df.sort_values(["mode", "payload_size"])["mode"]]
+    bars = ax.bar(x_positions, values, color=colors)
+    ax.set_xticks(x_positions)
+    ax.set_xticklabels(labels, fontsize=8)
+    ax.set_xlabel("Payload Size")
     ax.set_ylabel("Packet Loss (%)")
-    ax.set_title("Packet Loss by Payload Size")
+    ax.set_title("Packet Loss by Payload Size and Mode")
+    ax.set_ylim(bottom=0, top=max(max(values) * 1.2, 1.0))
+
+    # Add value labels on bars
+    for bar, val in zip(bars, values):
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.02,
+                f"{val:.1f}%", ha="center", va="bottom", fontsize=8)
+
     fig.tight_layout()
     fig.savefig(str(output_path), dpi=150)
     plt.close(fig)
