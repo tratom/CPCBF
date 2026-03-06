@@ -33,7 +33,7 @@ SSH into each RPi and clone the repository (or copy the `cpcbf/agent/` directory
 ssh pi@rpi4-a.local   # (or rpi4-b.local)
 
 # Clone or copy the project
-git clone <your-repo-url> ~/common-bench
+git clone https://github.com/tratom/CPCBF.git ~/common-bench
 cd ~/common-bench/cpcbf/agent
 
 # Build the agent binary
