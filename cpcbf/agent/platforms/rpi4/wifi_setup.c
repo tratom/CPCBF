@@ -70,16 +70,15 @@ static int wait_for_wpa_cli(int timeout_s)
     return -1;
 }
 
-/* Clean up any existing P2P groups and restart wpa_supplicant for a clean state. */
+/* Clean up any existing P2P groups. */
 static void cleanup_p2p(void)
 {
-    /* Try to remove any existing P2P groups */
+    /* Stop any ongoing P2P operations */
+    run_cmd("wpa_cli -i wlan0 p2p_stop_find 2>/dev/null");
+    run_cmd("wpa_cli -i wlan0 p2p_flush 2>/dev/null");
+    /* Remove all P2P groups */
     run_cmd("wpa_cli -i wlan0 p2p_group_remove \"*\" 2>/dev/null");
-    /* Restart wpa_supplicant via systemd for a clean state */
-    run_cmd("systemctl restart wpa_supplicant 2>/dev/null");
-    /* Wait until wpa_supplicant control interface is ready */
-    if (wait_for_wpa_cli(10) != 0)
-        platform_log("WARNING: wpa_cli not ready after 10s");
+    platform_sleep_ms(1000);
 }
 
 /* ---- Wi-Fi Direct (P2P) ---- */
@@ -196,9 +195,9 @@ int wifi_setup(const adapter_config_t *cfg, char *iface_out, size_t iface_out_le
 int wifi_teardown(const adapter_config_t *cfg)
 {
     (void)cfg;
-    /* Remove all P2P groups */
+    /* Stop P2P operations and remove all groups */
+    run_cmd("wpa_cli -i wlan0 p2p_stop_find 2>/dev/null");
+    run_cmd("wpa_cli -i wlan0 p2p_flush 2>/dev/null");
     run_cmd("wpa_cli -i wlan0 p2p_group_remove \"*\" 2>/dev/null");
-    /* Restart wpa_supplicant to restore clean state */
-    run_cmd("systemctl restart wpa_supplicant 2>/dev/null");
     return 0;
 }
