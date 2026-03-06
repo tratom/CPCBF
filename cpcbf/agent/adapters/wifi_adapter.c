@@ -118,10 +118,10 @@ static int wifi_get_rssi(protocol_adapter_t *self, int *rssi_dbm)
 {
     wifi_priv_t *priv = self->priv;
 
-    /* Use wpa_cli signal_poll on the P2P interface */
-    char cmd[128];
+    /* Use iw station dump to get signal level — works for P2P interfaces */
+    char cmd[256];
     snprintf(cmd, sizeof(cmd),
-        "wpa_cli -i %s signal_poll 2>/dev/null | grep '^RSSI=' | cut -d= -f2",
+        "iw dev %s station dump 2>/dev/null | grep 'signal:' | head -1 | awk '{print $2}'",
         priv->active_iface);
 
     FILE *fp = popen(cmd, "r");
@@ -132,7 +132,7 @@ static int wifi_get_rssi(protocol_adapter_t *self, int *rssi_dbm)
     int found = 0;
     if (fgets(line, sizeof(line), fp)) {
         int val = atoi(line);
-        if (val != 0) { /* atoi returns 0 on failure, but RSSI is always negative */
+        if (val < 0) { /* RSSI is always negative dBm */
             *rssi_dbm = val;
             found = 1;
         }
