@@ -3,7 +3,7 @@
 
 hosts:
   rpi4_a:
-    hostname: rpi4-a.local
+    hostname: 192.168.8.129
     username: pi
     password: raspberry
     # key_filename: ~/.ssh/id_rsa
@@ -11,7 +11,7 @@ hosts:
     agent_binary: /bin/cpcbf_agent
 
   rpi4_b:
-    hostname: rpi4-b.local
+    hostname: 192.168.8.115
     username: pi
     password: raspberry
     # key_filename: ~/.ssh/id_rsa

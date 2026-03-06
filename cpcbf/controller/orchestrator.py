@@ -120,7 +120,7 @@ class Orchestrator:
         # 4. Set up Wi-Fi link: GO (sender) first, then client (receiver)
         logger.info("Setting up Wi-Fi on sender (GO)...")
         resp = manager.send(
-            sender_id, {"command": "WIFI_SETUP"}, timeout=60.0
+            sender_id, {"command": "WIFI_SETUP"}, timeout=30.0
         )
         if resp.get("status") != "ok":
             logger.error("Sender Wi-Fi setup failed: %s", resp)
@@ -128,7 +128,7 @@ class Orchestrator:
 
         logger.info("Setting up Wi-Fi on receiver (client)...")
         resp = manager.send(
-            receiver_id, {"command": "WIFI_SETUP"}, timeout=120.0
+            receiver_id, {"command": "WIFI_SETUP"}, timeout=30.0
         )
         if resp.get("status") != "ok":
             logger.error("Receiver Wi-Fi setup failed: %s", resp)

@@ -1,5 +1,5 @@
 global:
-  repetitions: 100
+  repetitions: 300
   warmup: 5
   timeout_ms: 5000
   inter_packet_us: 0

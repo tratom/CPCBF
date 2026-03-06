@@ -43,21 +43,26 @@ def compute_run_stats(conn: sqlite3.Connection, run_id: int) -> RunStats:
     ).fetchone()
     test_name, mode, payload_size, repetitions = meta
 
-    # Get sender packets (non-warmup) for RTT stats
+    # For ping_pong, use sender packets (has RTT). For flood, use receiver packets.
+    source = "sender" if mode == "ping_pong" else "receiver"
     df = pd.read_sql_query(
         """
         SELECT seq, tx_us, rx_us, rtt_us, rssi, crc_ok, lost
         FROM packets
-        WHERE run_id = ? AND source = 'sender' AND warmup = 0
+        WHERE run_id = ? AND source = ? AND warmup = 0
         """,
         conn,
-        params=(run_id,),
+        params=(run_id, source),
     )
 
     total = len(df)
     lost_df = df[df["lost"] == 1]
     crc_err_df = df[df["crc_ok"] == 0]
-    valid = df[(df["lost"] == 0) & (df["rtt_us"] > 0)]
+    # For ping_pong, valid = not lost and has RTT. For flood, valid = not lost.
+    if mode == "ping_pong":
+        valid = df[(df["lost"] == 0) & (df["rtt_us"] > 0)]
+    else:
+        valid = df[df["lost"] == 0]
 
     packet_loss_pct = (len(lost_df) / total * 100) if total > 0 else 0.0
     crc_error_pct = (len(crc_err_df) / total * 100) if total > 0 else 0.0
