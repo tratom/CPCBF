@@ -31,7 +31,8 @@ typedef enum {
 /* Adapter configuration */
 typedef struct {
     char iface_name[32];   /* e.g. "wlan0" */
-    char peer_addr[48];    /* peer IP or MAC */
+    char peer_addr[48];    /* peer IP address for UDP */
+    char peer_mac[24];     /* peer WiFi MAC for P2P discovery */
     uint16_t port;         /* UDP port */
     int channel;           /* radio channel */
     char essid[64];        /* SSID or network name */

@@ -1,5 +1,8 @@
 /*
  * CPCBF — Wi-Fi Setup Implementation for RPi4
+ *
+ * Assumes wpa_supplicant is managed by systemd (Bookworm+ default).
+ * Uses wpa_cli for P2P operations against the running instance.
  */
 #include "wifi_setup.h"
 #include "platform_hal.h"
@@ -8,11 +11,13 @@
 #include <string.h>
 #include <unistd.h>
 
-/* Run a shell command. Returns 0 on success. */
+/* Run a shell command with stdout redirected to stderr (keep stdout clean for JSON). */
 static int run_cmd(const char *cmd)
 {
     platform_log("exec: %s", cmd);
-    int rc = system(cmd);
+    char wrapped[512];
+    snprintf(wrapped, sizeof(wrapped), "(%s) 1>&2", cmd);
+    int rc = system(wrapped);
     if (rc != 0)
         platform_log("command failed (rc=%d): %s", rc, cmd);
     return rc;
@@ -51,9 +56,30 @@ static int wait_for_iface(const char *prefix, int timeout_s,
     return -1;
 }
 
-static void kill_wpa_supplicant(void)
+/* Wait until wpa_cli can connect to wlan0 (up to timeout_s seconds). */
+static int wait_for_wpa_cli(int timeout_s)
 {
-    run_cmd("killall wpa_supplicant 2>/dev/null; sleep 1");
+    for (int i = 0; i < timeout_s * 2; i++) {
+        int rc = system("wpa_cli -i wlan0 status >/dev/null 2>&1");
+        if (rc == 0) {
+            platform_log("wpa_cli ready after %d ms", i * 500);
+            return 0;
+        }
+        usleep(500000);
+    }
+    return -1;
+}
+
+/* Clean up any existing P2P groups and restart wpa_supplicant for a clean state. */
+static void cleanup_p2p(void)
+{
+    /* Try to remove any existing P2P groups */
+    run_cmd("wpa_cli -i wlan0 p2p_group_remove \"*\" 2>/dev/null");
+    /* Restart wpa_supplicant via systemd for a clean state */
+    run_cmd("systemctl restart wpa_supplicant 2>/dev/null");
+    /* Wait until wpa_supplicant control interface is ready */
+    if (wait_for_wpa_cli(10) != 0)
+        platform_log("WARNING: wpa_cli not ready after 10s");
 }
 
 /* ---- Wi-Fi Direct (P2P) ---- */
@@ -61,12 +87,7 @@ static void kill_wpa_supplicant(void)
 static int setup_p2p(const adapter_config_t *cfg,
                      char *iface_out, size_t iface_out_len)
 {
-    kill_wpa_supplicant();
-
-    /* Start wpa_supplicant with P2P config */
-    run_cmd("wpa_supplicant -B -i wlan0 -c /etc/wpa_supplicant/wpa_supplicant.conf "
-            "-D nl80211 2>/dev/null");
-    platform_sleep_ms(1000);
+    cleanup_p2p();
 
     if (cfg->role == ROLE_SENDER) {
         /* GO role: create P2P group */
@@ -85,40 +106,41 @@ static int setup_p2p(const adapter_config_t *cfg,
             return -1;
         }
 
-        /* Assign IP */
+        /* Assign IP (CIDR notation) */
         char ip_cmd[128];
         snprintf(ip_cmd, sizeof(ip_cmd),
-            "ip addr add %s/%s dev %s 2>/dev/null; ip link set %s up",
-            cfg->local_ip, cfg->netmask, iface_out, iface_out);
+            "ip addr add %s/24 dev %s 2>/dev/null; ip link set %s up",
+            cfg->local_ip, iface_out, iface_out);
         run_cmd(ip_cmd);
 
         /* Enable WPS push button for client connection */
         char wps_cmd[128];
-        snprintf(wps_cmd, sizeof(wps_cmd), "wpa_cli -i %s wps_pbc", iface_out);
-        run_cmd(wps_cmd);
+        snprintf(wps_cmd, sizeof(wps_cmd),
+            "wpa_cli -i %s wps_pbc", iface_out);
+        run_cmd(wps_cmd);  /* non-fatal if it fails */
 
     } else {
         /* Client role: find and connect to GO */
         run_cmd("wpa_cli -i wlan0 p2p_find");
-        platform_sleep_ms(3000);
+        platform_sleep_ms(5000);  /* give time to discover the GO */
 
         char connect_cmd[256];
         snprintf(connect_cmd, sizeof(connect_cmd),
-            "wpa_cli -i wlan0 p2p_connect %s pbc join", cfg->peer_addr);
+            "wpa_cli -i wlan0 p2p_connect %s pbc join", cfg->peer_mac);
         if (run_cmd(connect_cmd) != 0) {
             platform_log("p2p_connect failed");
             return -1;
         }
 
-        if (wait_for_iface("p2p-wlan0", 15, iface_out, iface_out_len) != 0) {
+        if (wait_for_iface("p2p-wlan0", 20, iface_out, iface_out_len) != 0) {
             platform_log("P2P client interface did not appear");
             return -1;
         }
 
         char ip_cmd[128];
         snprintf(ip_cmd, sizeof(ip_cmd),
-            "ip addr add %s/%s dev %s 2>/dev/null; ip link set %s up",
-            cfg->local_ip, cfg->netmask, iface_out, iface_out);
+            "ip addr add %s/24 dev %s 2>/dev/null; ip link set %s up",
+            cfg->local_ip, iface_out, iface_out);
         run_cmd(ip_cmd);
     }
 
@@ -131,7 +153,8 @@ static int setup_p2p(const adapter_config_t *cfg,
 static int setup_adhoc(const adapter_config_t *cfg,
                        char *iface_out, size_t iface_out_len)
 {
-    kill_wpa_supplicant();
+    /* For ad-hoc, we do need to stop wpa_supplicant to change interface type */
+    run_cmd("systemctl stop wpa_supplicant 2>/dev/null");
     run_cmd("killall dhcpcd 2>/dev/null");
     platform_sleep_ms(500);
 
@@ -151,8 +174,8 @@ static int setup_adhoc(const adapter_config_t *cfg,
 
     char ip_cmd[128];
     snprintf(ip_cmd, sizeof(ip_cmd),
-        "ip addr add %s/%s dev wlan0 2>/dev/null",
-        cfg->local_ip, cfg->netmask);
+        "ip addr add %s/24 dev wlan0 2>/dev/null",
+        cfg->local_ip);
     run_cmd(ip_cmd);
 
     snprintf(iface_out, iface_out_len, "wlan0");
@@ -173,11 +196,9 @@ int wifi_setup(const adapter_config_t *cfg, char *iface_out, size_t iface_out_le
 int wifi_teardown(const adapter_config_t *cfg)
 {
     (void)cfg;
-    /* Remove P2P group interfaces */
-    run_cmd("wpa_cli -i wlan0 p2p_group_remove p2p-wlan0-0 2>/dev/null");
-    /* Restore managed mode */
-    run_cmd("ip link set wlan0 down 2>/dev/null");
-    run_cmd("iw dev wlan0 set type managed 2>/dev/null");
-    run_cmd("ip link set wlan0 up 2>/dev/null");
+    /* Remove all P2P groups */
+    run_cmd("wpa_cli -i wlan0 p2p_group_remove \"*\" 2>/dev/null");
+    /* Restart wpa_supplicant to restore clean state */
+    run_cmd("systemctl restart wpa_supplicant 2>/dev/null");
     return 0;
 }

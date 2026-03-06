@@ -1,1 +1,19 @@
-.conf
+# Python
+.venv/
+__pycache__/
+*.egg-info/
+*.pyc
+
+# C build artifacts
+cpcbf/agent/build/
+
+# Config (local credentials)
+*.conf
+
+# Results (generated data)
+results/
+*.db
+
+# Editor
+*.swp
+*~

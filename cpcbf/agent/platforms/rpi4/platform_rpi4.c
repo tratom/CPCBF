@@ -40,14 +40,14 @@ void platform_sleep_ms(uint32_t ms)
 int platform_radio_disable(const char *subsystem)
 {
     char cmd[128];
-    snprintf(cmd, sizeof(cmd), "rfkill block %s", subsystem);
+    snprintf(cmd, sizeof(cmd), "rfkill block %s 1>&2", subsystem);
     return system(cmd);
 }
 
 int platform_radio_enable(const char *subsystem)
 {
     char cmd[128];
-    snprintf(cmd, sizeof(cmd), "rfkill unblock %s", subsystem);
+    snprintf(cmd, sizeof(cmd), "rfkill unblock %s 1>&2", subsystem);
     return system(cmd);
 }
 

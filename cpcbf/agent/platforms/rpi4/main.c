@@ -21,6 +21,7 @@ static adapter_config_t g_adapter_cfg;
 static test_config_t g_test_cfg;
 static test_results_t *g_results = NULL;
 static int g_configured = 0;
+static int g_adapter_ready = 0;
 
 static void send_response(const char *status, const char *message, cJSON *data)
 {
@@ -58,6 +59,8 @@ static void handle_configure(cJSON *params)
     if (j) strncpy(g_adapter_cfg.iface_name, j->valuestring, sizeof(g_adapter_cfg.iface_name) - 1);
     j = cJSON_GetObjectItem(params, "peer_addr");
     if (j) strncpy(g_adapter_cfg.peer_addr, j->valuestring, sizeof(g_adapter_cfg.peer_addr) - 1);
+    j = cJSON_GetObjectItem(params, "peer_mac");
+    if (j) strncpy(g_adapter_cfg.peer_mac, j->valuestring, sizeof(g_adapter_cfg.peer_mac) - 1);
     j = cJSON_GetObjectItem(params, "port");
     if (j) g_adapter_cfg.port = (uint16_t)j->valueint;
     j = cJSON_GetObjectItem(params, "channel");
@@ -141,6 +144,29 @@ static void handle_radio_status(void)
     send_ok("radio status", data);
 }
 
+static void handle_wifi_setup(void)
+{
+    if (!g_configured) {
+        send_error("not configured");
+        return;
+    }
+
+    /* Tear down any previous adapter state */
+    if (g_adapter_ready) {
+        wifi_adapter.deinit(&wifi_adapter);
+        g_adapter_ready = 0;
+    }
+
+    int rc = wifi_adapter.init(&wifi_adapter, &g_adapter_cfg);
+    if (rc != ADAPTER_OK) {
+        send_error("adapter init failed");
+        return;
+    }
+
+    g_adapter_ready = 1;
+    send_ok("wifi setup complete", NULL);
+}
+
 static void handle_start(void)
 {
     if (!g_configured) {
@@ -154,11 +180,14 @@ static void handle_start(void)
         g_results = NULL;
     }
 
-    /* Initialize adapter */
-    int rc = wifi_adapter.init(&wifi_adapter, &g_adapter_cfg);
-    if (rc != ADAPTER_OK) {
-        send_error("adapter init failed");
-        return;
+    /* Initialize adapter if not already done via WIFI_SETUP */
+    if (!g_adapter_ready) {
+        int rc = wifi_adapter.init(&wifi_adapter, &g_adapter_cfg);
+        if (rc != ADAPTER_OK) {
+            send_error("adapter init failed");
+            return;
+        }
+        g_adapter_ready = 1;
     }
 
     platform_log("starting test: mode=%d role=%d payload=%u reps=%u",
@@ -167,9 +196,6 @@ static void handle_start(void)
 
     /* Run test (blocking) */
     g_results = test_engine_run(&wifi_adapter, &g_test_cfg);
-
-    /* Tear down adapter */
-    wifi_adapter.deinit(&wifi_adapter);
 
     if (g_results)
         send_ok("test complete", NULL);
@@ -207,7 +233,10 @@ static void handle_stop(void)
         test_results_free(g_results);
         g_results = NULL;
     }
-    wifi_adapter.deinit(&wifi_adapter);
+    if (g_adapter_ready) {
+        wifi_adapter.deinit(&wifi_adapter);
+        g_adapter_ready = 0;
+    }
     g_configured = 0;
     send_ok("stopped", NULL);
 }
@@ -246,6 +275,8 @@ int main(void)
             handle_radio_disable(params ? params : cJSON_CreateObject());
         } else if (strcmp(command, "RADIO_STATUS") == 0) {
             handle_radio_status();
+        } else if (strcmp(command, "WIFI_SETUP") == 0) {
+            handle_wifi_setup();
         } else if (strcmp(command, "START") == 0) {
             handle_start();
         } else if (strcmp(command, "GET_RESULTS") == 0) {

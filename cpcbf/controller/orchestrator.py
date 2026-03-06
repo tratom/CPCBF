@@ -43,7 +43,8 @@ class Orchestrator:
 
         return {
             "iface_name": "wlan0",
-            "peer_addr": self.hosts[peer_id].wifi_mac if test.topology == "p2p" else peer_ip,
+            "peer_addr": peer_ip,
+            "peer_mac": self.hosts[peer_id].wifi_mac,
             "port": test.port,
             "channel": test.channel,
             "essid": "CPCBF_TEST",
@@ -94,20 +95,39 @@ class Orchestrator:
         )
 
         resp = manager.send(
-            receiver_id, {"command": "CONFIGURE", "params": receiver_params}
-        )
-        if resp.get("status") != "ok":
-            logger.error("Receiver configure failed: %s", resp)
-            return None
-
-        resp = manager.send(
             sender_id, {"command": "CONFIGURE", "params": sender_params}
         )
         if resp.get("status") != "ok":
             logger.error("Sender configure failed: %s", resp)
             return None
 
-        # 4. Start receiver first (2s head start for link stabilization)
+        resp = manager.send(
+            receiver_id, {"command": "CONFIGURE", "params": receiver_params}
+        )
+        if resp.get("status") != "ok":
+            logger.error("Receiver configure failed: %s", resp)
+            return None
+
+        # 4. Set up Wi-Fi link: GO (sender) first, then client (receiver)
+        logger.info("Setting up Wi-Fi on sender (GO)...")
+        resp = manager.send(
+            sender_id, {"command": "WIFI_SETUP"}, timeout=30.0
+        )
+        if resp.get("status") != "ok":
+            logger.error("Sender Wi-Fi setup failed: %s", resp)
+            return None
+
+        logger.info("Setting up Wi-Fi on receiver (client)...")
+        resp = manager.send(
+            receiver_id, {"command": "WIFI_SETUP"}, timeout=30.0
+        )
+        if resp.get("status") != "ok":
+            logger.error("Receiver Wi-Fi setup failed: %s", resp)
+            return None
+
+        logger.info("Wi-Fi link established, starting test...")
+
+        # 5. Run test: receiver first (2s head start), then sender
         def start_agent(host_id: str, timeout: float) -> dict:
             return manager.send(
                 host_id, {"command": "START"}, timeout=timeout

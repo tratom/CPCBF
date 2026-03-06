@@ -7,13 +7,13 @@ hosts:
     username: pi
     password: raspberry
     # key_filename: ~/.ssh/id_rsa
-    wifi_mac: "DC:A6:32:81:07:A0"
-    agent_binary: /tmp/cpcbf_agent
+    wifi_mac: "dc:a6:32:81:07:a0"
+    agent_binary: /bin/cpcbf_agent
 
   rpi4_b:
     hostname: rpi4-b.local
     username: pi
     password: raspberry
     # key_filename: ~/.ssh/id_rsa
-    wifi_mac: "dc:a6:32:yy:yy:yy"
-    agent_binary: /tmp/cpcbf_agent
+    wifi_mac: "d8:3a:dd:38:36:b7"
+    agent_binary: /bin/cpcbf_agent

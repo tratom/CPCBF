@@ -42,8 +42,8 @@ cmake -DBUILD_RPI4=ON ..
 make
 
 # Deploy to the expected location
-sudo cp cpcbf_agent /tmp/cpcbf_agent
-sudo chmod +x /tmp/cpcbf_agent
+sudo cp cpcbf_agent /bin/cpcbf_agent
+sudo chmod +x /bin/cpcbf_agent
 ```
 
 Repeat on both RPis.

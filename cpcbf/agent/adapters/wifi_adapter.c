@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <errno.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -66,7 +67,7 @@ static int wifi_init(protocol_adapter_t *self, const adapter_config_t *cfg)
     local.sin_addr.s_addr = inet_addr(cfg->local_ip);
 
     if (bind(priv->sock_fd, (struct sockaddr *)&local, sizeof(local)) < 0) {
-        platform_log("bind() failed on %s:%d", cfg->local_ip, cfg->port);
+        platform_log("bind() failed on %s:%d: %s", cfg->local_ip, cfg->port, strerror(errno));
         close(priv->sock_fd);
         wifi_teardown(cfg);
         free(priv);
