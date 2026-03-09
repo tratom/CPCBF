@@ -228,6 +228,97 @@ ping -c 100 192.168.49.2
 
 ---
 
+## Field Mode: Autonomous Benchmarking (No Ethernet)
+
+For field benchmarks (underground garage, open air, indoor) where Ethernet is impractical, both RPis can run tests autonomously on boot using a Python wrapper + systemd.
+
+Each RPi reads the same YAML plans from disk, spawns the C agent as a subprocess, and pipes JSON commands — the same protocol the SSH controller uses. The ACT LED blinks during tests and turns off when done.
+
+### Field Prerequisites
+
+- Both RPis already have the agent binary built and installed (Step 1 above)
+- A USB battery pack or portable power supply for each RPi
+
+### Field Step 1: Deploy to Each RPi
+
+SSH into each RPi and copy the `cpcbf/field/` directory:
+
+```bash
+# On each RPi:
+cd ~/common-bench/cpcbf/field
+
+# On rpi4_a (the GO / sender):
+sudo ./deploy.sh sender
+
+# On rpi4_b (the client / receiver):
+sudo ./deploy.sh receiver
+```
+
+This will:
+- Install PyYAML if needed
+- Copy `auto_bench.py` to `/opt/cpcbf/`
+- Copy the role config to `/etc/cpcbf/role.json`
+- Copy all YAML plans to `/etc/cpcbf/plans/`
+- Install and enable the `cpcbf-auto` systemd service
+
+### Field Step 2: Set the Label for Each Location
+
+Before each field session, edit the label on both RPis:
+
+```bash
+sudo nano /etc/cpcbf/role.json
+```
+
+Change `"label"` to describe the location and distance, e.g. `"garage_10m"`, `"openair_40m"`, `"indoor_20m"`. Both RPis should use the same label.
+
+### Field Step 3: Run Tests
+
+1. Place RPis at the desired distance
+2. Power on both (battery pack)
+3. **LED blinks** = tests running
+4. **LED off** = all tests completed, safe to power off
+
+No manual intervention needed. The Wi-Fi Direct P2P handshake provides synchronization — if one RPi boots faster, the P2P setup simply waits for the other.
+
+### Field Step 4: Collect Results
+
+After all locations are done, connect the RPis to a network and pull the results:
+
+```bash
+scp pi@rpi4-a.local:/home/pi/cpcbf_results/*.jsonl ./results/
+scp pi@rpi4-b.local:/home/pi/cpcbf_results/*.jsonl ./results/
+```
+
+Result filenames include the label and test name, e.g. `garage_10m_rtt_128B_sender.jsonl`.
+
+### Re-running at Another Location
+
+Either reboot both RPis or manually restart the service:
+
+```bash
+sudo systemctl restart cpcbf-auto
+```
+
+### LED Reference
+
+| State | ACT LED |
+|-------|---------|
+| Booting / tests running | Heartbeat blink |
+| All tests completed | Off (solid) |
+| Error (service crashed) | Stays blinking |
+
+### Field Troubleshooting
+
+| Problem | Fix |
+|---------|-----|
+| RPi loses Ethernet after reboot | The service restarts NetworkManager automatically after tests. If it still fails, run `sudo systemctl start NetworkManager` manually |
+| Empty result files | Check agent logs: `journalctl -u cpcbf-auto` and `/tmp/cpcbf_agent.log` |
+| P2P connection never forms | Ensure both RPis are powered on within ~60s of each other. Check that `peer_mac` in `role.json` matches the other RPi's wlan0 MAC |
+| Tests take too long | Edit the YAML plans in `/etc/cpcbf/plans/` to reduce repetitions or payload sizes |
+| Want to disable auto-run on boot | `sudo systemctl disable cpcbf-auto` |
+
+---
+
 ## Troubleshooting
 
 | Problem | Fix |
@@ -276,6 +367,12 @@ cpcbf/
 │   ├── stats.py                   # Statistical analysis
 │   ├── plots.py                   # Matplotlib visualizations
 │   └── compare.py                 # Cross-run comparison
+├── field/                      # Autonomous field benchmarking
+│   ├── auto_bench.py              # Boot-time test runner
+│   ├── role_sender.json           # Sender board config template
+│   ├── role_receiver.json         # Receiver board config template
+│   ├── cpcbf-auto.service         # systemd unit file
+│   └── deploy.sh                  # One-command setup script
 ├── plans/                      # Test plan YAML files
 │   ├── wifi_rpi4_rtt.yaml
 │   ├── wifi_rpi4_flood.yaml

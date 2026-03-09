@@ -1,0 +1,7 @@
+{
+    "role": "sender",
+    "peer_mac": "da:3a:dd:38:36:b7",
+    "peer_addr": "192.168.49.2",
+    "local_ip": "192.168.49.1",
+    "label": "lab-test"
+}
