@@ -121,7 +121,7 @@ static int wifi_get_rssi(protocol_adapter_t *self, int *rssi_dbm)
     /* Use iw station dump to get signal level — works for P2P interfaces */
     char cmd[256];
     snprintf(cmd, sizeof(cmd),
-        "iw dev %s station dump 2>/dev/null | grep 'signal:' | head -1 | awk '{print $2}'",
+        "wpa_cli -i %s signal_poll | grep 'RSSI=' | cut -d'=' -f2",
         priv->active_iface);
 
     FILE *fp = popen(cmd, "r");
