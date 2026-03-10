@@ -13,7 +13,7 @@ Automated WiFi latency and throughput benchmarking between Raspberry Pi 4 pairs 
 ### Software — Raspberry Pi (both boards)
 
 - Raspberry Pi OS (Bookworm or Bullseye, 32-bit or 64-bit)
-- Build tools: `sudo apt update && sudo apt install -y build-essential cmake`
+- Build tools: `sudo apt update && sudo apt install -y build-essential cmake git libbluetooth-dev`
 - SSH enabled: `sudo raspi-config` → Interface Options → SSH → Enable
 - `wpa_supplicant` installed (ships by default)
 
@@ -256,17 +256,17 @@ sudo ./deploy.sh receiver
 
 This will:
 - Install PyYAML if needed
-- Copy `auto_bench.py` to `/opt/cpcbf/`
-- Copy the role config to `/etc/cpcbf/role.json`
-- Copy all YAML plans to `/etc/cpcbf/plans/`
+- Copy the role template to `cpcbf/field/role.json` (the active config)
 - Install and enable the `cpcbf-auto` systemd service
+
+Everything else (plans, script, results) stays in the repo directory — no files copied to `/etc` or `/opt`.
 
 ### Field Step 2: Set the Label for Each Location
 
 Before each field session, edit the label on both RPis:
 
 ```bash
-sudo nano /etc/cpcbf/role.json
+nano ~/common-bench/cpcbf/field/role.json
 ```
 
 Change `"label"` to describe the location and distance, e.g. `"garage_10m"`, `"openair_40m"`, `"indoor_20m"`. Both RPis should use the same label.
@@ -280,16 +280,37 @@ Change `"label"` to describe the location and distance, e.g. `"garage_10m"`, `"o
 
 No manual intervention needed. The Wi-Fi Direct P2P handshake provides synchronization — if one RPi boots faster, the P2P setup simply waits for the other.
 
-### Field Step 4: Collect Results
+### Field Step 4: Collect and Merge Results
 
-After all locations are done, connect the RPis to a network and pull the results:
+After all locations are done, connect the RPis to a network and pull the results into a single directory:
 
 ```bash
-scp pi@rpi4-a.local:/home/pi/cpcbf_results/*.jsonl ./results/
-scp pi@rpi4-b.local:/home/pi/cpcbf_results/*.jsonl ./results/
+mkdir -p field_data
+scp pi@rpi4-a.local:~/common-bench/cpcbf/field/results/*.jsonl field_data/
+scp pi@rpi4-b.local:~/common-bench/cpcbf/field/results/*.jsonl field_data/
 ```
 
-Result filenames include the label and test name, e.g. `garage_10m_rtt_128B_sender.jsonl`.
+Each RPi saves its own side of the data (e.g. `garage_10m_rtt_128B_sender.jsonl` and `garage_10m_rtt_128B_receiver.jsonl`). Merge matching pairs into a single JSONL file for analysis:
+
+```bash
+cd cpcbf
+python field/merge_results.py ../field_data/ -o results/results.jsonl
+```
+
+### Field Step 5: Run Analysis
+
+Once merged, run the full analysis pipeline:
+
+```bash
+python run_analysis.py --results results/results.jsonl --output results/
+```
+
+This will:
+1. Ingest the JSONL into a SQLite database (`results/benchmark.db`)
+2. Compute per-run statistics (RTT mean/median/P95/P99, 95% CI, packet loss, jitter, RSSI, throughput)
+3. Print a comparison table and save it as CSV
+4. Generate plots in `results/plots/` (RTT boxplot, RTT CDF, throughput bar, loss bar, RSSI timeseries)
+5. Export raw per-packet data as CSV
 
 ### Re-running at Another Location
 
@@ -314,7 +335,7 @@ sudo systemctl restart cpcbf-auto
 | RPi loses Ethernet after reboot | The service restarts NetworkManager automatically after tests. If it still fails, run `sudo systemctl start NetworkManager` manually |
 | Empty result files | Check agent logs: `journalctl -u cpcbf-auto` and `/tmp/cpcbf_agent.log` |
 | P2P connection never forms | Ensure both RPis are powered on within ~60s of each other. Check that `peer_mac` in `role.json` matches the other RPi's wlan0 MAC |
-| Tests take too long | Edit the YAML plans in `/etc/cpcbf/plans/` to reduce repetitions or payload sizes |
+| Tests take too long | Edit the YAML plans in `cpcbf/plans/` to reduce repetitions or payload sizes |
 | Want to disable auto-run on boot | `sudo systemctl disable cpcbf-auto` |
 
 ---
@@ -369,6 +390,7 @@ cpcbf/
 │   └── compare.py                 # Cross-run comparison
 ├── field/                      # Autonomous field benchmarking
 │   ├── auto_bench.py              # Boot-time test runner
+│   ├── merge_results.py           # Merge sender+receiver JSONL
 │   ├── role_sender.json           # Sender board config template
 │   ├── role_receiver.json         # Receiver board config template
 │   ├── cpcbf-auto.service         # systemd unit file

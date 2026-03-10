@@ -1,8 +1,8 @@
 global:
   repetitions: 1000
   warmup: 10
-  timeout_ms: 5000
-  inter_packet_us: 100
+  timeout_ms: 2000
+  inter_packet_us: 0
   port: 5201
   channel: 2437
   topology: p2p
@@ -15,4 +15,6 @@ tests:
     board: rpi4
     payload_sizes: [32, 128, 512, 1024, 4096, 8192]
 
-#total exec time 6 minutes
+#total exec time ~2 minutes (1010 packets × 1ms pacing + receiver drain)
+
+#1472 is the max payload size for UDP over Ethernet (1500 - 20 IP header - 8 UDP header)

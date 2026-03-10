@@ -5,7 +5,7 @@ Wants=multi-user.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/bin/python3 /opt/cpcbf/auto_bench.py
+ExecStart=/usr/bin/python3 __SCRIPT_DIR__/auto_bench.py
 ExecStopPost=/bin/systemctl start NetworkManager
 StandardOutput=journal
 StandardError=journal

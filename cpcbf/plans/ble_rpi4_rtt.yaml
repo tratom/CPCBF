@@ -1,0 +1,19 @@
+global:
+  repetitions: 300
+  warmup: 5
+  timeout_ms: 5000
+  inter_packet_us: 1000000
+  port: 128             # L2CAP PSM
+  channel: 0
+  topology: ble_l2cap
+  cooldown_s: 5
+
+tests:
+  - name: ble_rpi4_rtt
+    mode: ping_pong
+    protocol: ble
+    board: rpi4
+    payload_sizes: [20, 100, 244]
+
+# BLE MTU: 20B = default ATT payload, 244B = max BLE 4.2 data length
+# total exec time ~8 min

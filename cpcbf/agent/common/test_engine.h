@@ -13,6 +13,7 @@
 typedef enum {
     TEST_MODE_PING_PONG = 0,
     TEST_MODE_FLOOD     = 1,
+    TEST_MODE_RSSI      = 2,
 } test_mode_t;
 
 /* Test configuration */

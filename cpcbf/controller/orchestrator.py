@@ -47,6 +47,28 @@ class Orchestrator:
         peer_id = host_ids[1] if host_id == host_ids[0] else host_ids[0]
 
         is_sender = role == "sender"
+
+        if test.protocol == "ble":
+            return {
+                "iface_name": "hci0",
+                "peer_addr": "",
+                "peer_mac": self.hosts[peer_id].ble_mac,
+                "port": test.port,
+                "channel": 0,
+                "essid": "",
+                "local_ip": "",
+                "netmask": "",
+                "role": role,
+                "topology": "ble_l2cap",
+                "protocol": "ble",
+                "mode": test.mode.value,
+                "payload_size": payload_size,
+                "repetitions": test.repetitions,
+                "warmup": test.warmup,
+                "timeout_ms": test.timeout_ms,
+                "inter_packet_us": test.inter_packet_us,
+            }
+
         local_ip = "192.168.49.1" if is_sender else "192.168.49.2"
         peer_ip = "192.168.49.2" if is_sender else "192.168.49.1"
 
@@ -117,24 +139,35 @@ class Orchestrator:
             logger.error("Receiver configure failed: %s", resp)
             return None
 
-        # 4. Set up Wi-Fi link: GO (sender) first, then client (receiver)
-        logger.info("Setting up Wi-Fi on sender (GO)...")
+        # 4. Set up link (protocol-dependent order)
+        if test.protocol == "ble":
+            # BLE: receiver (peripheral/advertiser) first, then sender (central)
+            setup_cmd = "BLE_SETUP"
+            first_id, second_id = receiver_id, sender_id
+            first_label, second_label = "receiver (peripheral)", "sender (central)"
+        else:
+            # WiFi: sender (GO) first, then receiver (client)
+            setup_cmd = "WIFI_SETUP"
+            first_id, second_id = sender_id, receiver_id
+            first_label, second_label = "sender (GO)", "receiver (client)"
+
+        logger.info("Setting up %s on %s...", test.protocol, first_label)
         resp = manager.send(
-            sender_id, {"command": "WIFI_SETUP"}, timeout=60.0
+            first_id, {"command": setup_cmd}, timeout=90.0
         )
         if resp.get("status") != "ok":
-            logger.error("Sender Wi-Fi setup failed: %s", resp)
+            logger.error("%s setup failed on %s: %s", test.protocol, first_label, resp)
             return None
 
-        logger.info("Setting up Wi-Fi on receiver (client)...")
+        logger.info("Setting up %s on %s...", test.protocol, second_label)
         resp = manager.send(
-            receiver_id, {"command": "WIFI_SETUP"}, timeout=60.0
+            second_id, {"command": setup_cmd}, timeout=90.0
         )
         if resp.get("status") != "ok":
-            logger.error("Receiver Wi-Fi setup failed: %s", resp)
+            logger.error("%s setup failed on %s: %s", test.protocol, second_label, resp)
             return None
 
-        logger.info("Wi-Fi link established, starting test...")
+        logger.info("%s link established, starting test...", test.protocol.upper())
 
         # 5. Run test: receiver first (2s head start), then sender
         def start_agent(host_id: str, timeout: float) -> dict:
@@ -146,7 +179,8 @@ class Orchestrator:
 
         with ThreadPoolExecutor(max_workers=2) as pool:
             receiver_future = pool.submit(start_agent, receiver_id, timeout)
-            time.sleep(2)  # receiver head start
+            if test.mode != TestMode.RSSI:
+                time.sleep(2)  # receiver head start
             sender_future = pool.submit(start_agent, sender_id, timeout)
 
             sender_resp = sender_future.result()

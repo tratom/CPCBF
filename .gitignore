@@ -14,6 +14,10 @@ cpcbf/agent/build/
 results/
 *.db
 
+# Field mode (per-board config and local results)
+cpcbf/field/role.json
+cpcbf/field/results/
+
 # Editor
 *.swp
 *~

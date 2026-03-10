@@ -8,6 +8,7 @@ hosts:
     password: raspberry
     # key_filename: ~/.ssh/id_rsa
     wifi_mac: "dc:a6:32:81:07:a0"
+    ble_mac: "DC:A6:32:81:07:A0"   # run `hcitool dev` on rpi4_a to get this
     agent_binary: /bin/cpcbf_agent
 
   rpi4_b:
@@ -16,4 +17,5 @@ hosts:
     password: raspberry
     # key_filename: ~/.ssh/id_rsa
     wifi_mac: "d8:3a:dd:38:36:b7"
+    ble_mac: "D8:3A:DD:38:36:B7"   # run `hcitool dev` on rpi4_b to get this
     agent_binary: /bin/cpcbf_agent

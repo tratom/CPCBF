@@ -3,10 +3,11 @@
 
 import subprocess, json, yaml, sys, os, glob, time, datetime
 
+REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 AGENT_BIN = "/bin/cpcbf_agent"
-PLANS_DIR = "/etc/cpcbf/plans"
-ROLE_FILE = "/etc/cpcbf/role.json"
-OUTPUT_DIR = "/home/pi/cpcbf_results"
+PLANS_DIR = os.path.join(REPO_DIR, "plans")
+ROLE_FILE = os.path.join(REPO_DIR, "field", "role.json")
+OUTPUT_DIR = os.path.join(REPO_DIR, "field", "results")
 LED_PATH = "/sys/class/leds/ACT"
 
 
@@ -76,8 +77,8 @@ def run_test_plan(role_cfg, plan, label_prefix):
                 # WIFI_SETUP (GO creates group, client finds & joins)
                 send_cmd(proc, {"command": "WIFI_SETUP"}, timeout=120)
 
-                # Sender waits 2s for receiver to be ready
-                if role_str == "sender":
+                # Sender waits 2s for receiver to be ready (not needed for RSSI mode)
+                if role_str == "sender" and test["mode"] != "rssi":
                     time.sleep(2)
 
                 # START (blocking -- runs entire test)
@@ -86,24 +87,28 @@ def run_test_plan(role_cfg, plan, label_prefix):
                 # GET_RESULTS
                 resp = send_cmd(proc, {"command": "GET_RESULTS"})
 
-                # Save results
+                # Save results in ingest.py-compatible format
                 test_name = f"{label_prefix}_{test['name']}_{payload_size}B"
                 result_file = os.path.join(
                     OUTPUT_DIR, f"{test_name}_{role_str}.jsonl"
                 )
+                # Match orchestrator.py output format exactly:
+                # sender/receiver contain the full agent data dict
+                record = {
+                    "test_name": test_name,
+                    "mode": test["mode"],
+                    "protocol": "wifi",
+                    "board": "rpi4",
+                    "payload_size": payload_size,
+                    "repetitions": g["repetitions"],
+                    "warmup": g["warmup"],
+                    "topology": g.get("topology", "p2p"),
+                    role_str: resp.get("data", {}),
+                    "clock_offset_us": None,
+                    "timestamp": time.time(),
+                }
                 with open(result_file, "w") as f:
-                    json.dump(
-                        {
-                            "test_name": test_name,
-                            "mode": test["mode"],
-                            "payload_size": payload_size,
-                            "protocol": "wifi",
-                            "board": "rpi4",
-                            "source": role_str,
-                            "results": resp.get("data", {}),
-                        },
-                        f,
-                    )
+                    json.dump(record, f)
                     f.write("\n")
 
             finally:

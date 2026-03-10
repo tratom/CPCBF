@@ -16,6 +16,9 @@ void platform_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
 /* Sleep for the given number of milliseconds. */
 void platform_sleep_ms(uint32_t ms);
 
+/* Sleep for the given number of microseconds. */
+void platform_sleep_us(uint32_t us);
+
 /* Disable the radio via rfkill or equivalent. Returns 0 on success. */
 int platform_radio_disable(const char *subsystem);
 

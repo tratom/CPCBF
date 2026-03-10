@@ -1,0 +1,18 @@
+global:
+  repetitions: 30
+  warmup: 3
+  timeout_ms: 5000
+  inter_packet_us: 500000
+  port: 128             # L2CAP PSM
+  channel: 0
+  topology: ble_l2cap
+  cooldown_s: 2
+
+tests:
+  - name: ble_rpi4_smoke
+    mode: ping_pong
+    protocol: ble
+    board: rpi4
+    payload_sizes: [20]
+
+# total exec time ~2 min

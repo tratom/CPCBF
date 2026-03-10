@@ -31,9 +31,11 @@ if(BUILD_RPI4)
         platforms/rpi4/main.c
         platforms/rpi4/platform_rpi4.c
         platforms/rpi4/wifi_setup.c
+        platforms/rpi4/ble_setup.c
         adapters/wifi_adapter.c
+        adapters/ble_adapter.c
     )
-    target_link_libraries(cpcbf_agent PRIVATE cpcbf_common cpcbf_cjson)
+    target_link_libraries(cpcbf_agent PRIVATE cpcbf_common cpcbf_cjson bluetooth)
     target_include_directories(cpcbf_agent PRIVATE
         common
         platforms/rpi4

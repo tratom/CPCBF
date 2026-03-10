@@ -7,9 +7,10 @@ from enum import Enum
 from typing import Optional
 
 
-class TestMode(Enum):
+class TestMode(str, Enum):
     PING_PONG = "ping_pong"
     FLOOD = "flood"
+    RSSI = "rssi"
 
 
 @dataclass
@@ -54,6 +55,7 @@ class HostInfo:
     password: Optional[str] = None
     key_filename: Optional[str] = None
     wifi_mac: str = ""
+    ble_mac: str = ""
     agent_binary: str = "/tmp/cpcbf_agent"
 
 

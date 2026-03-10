@@ -2,7 +2,7 @@ global:
   repetitions: 300
   warmup: 5
   timeout_ms: 5000
-  inter_packet_us: 0
+  inter_packet_us: 1000000
   port: 5201
   channel: 2437
   topology: p2p
@@ -13,7 +13,7 @@ tests:
     mode: ping_pong
     protocol: wifi
     board: rpi4
-    payload_sizes: [32, 128, 512, 1024, 4096, 8192]
+    payload_sizes: [32, 128, 512, 1472, 4096]
 
 
 # total exec time 6 min

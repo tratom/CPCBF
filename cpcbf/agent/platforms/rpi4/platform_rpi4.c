@@ -37,6 +37,14 @@ void platform_sleep_ms(uint32_t ms)
     nanosleep(&ts, NULL);
 }
 
+void platform_sleep_us(uint32_t us)
+{
+    struct timespec ts;
+    ts.tv_sec = us / 1000000;
+    ts.tv_nsec = (us % 1000000) * 1000L;
+    nanosleep(&ts, NULL);
+}
+
 int platform_radio_disable(const char *subsystem)
 {
     char cmd[128];

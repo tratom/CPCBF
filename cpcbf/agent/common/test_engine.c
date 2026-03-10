@@ -95,10 +95,6 @@ static void run_ping_pong_sender(protocol_adapter_t *adapter,
         pr->rtt_us = rx_us - tx_us;
         res->packets_received++;
 
-        int rssi;
-        if (adapter->get_rssi(adapter, &rssi) == ADAPTER_OK)
-            pr->rssi = rssi;
-
         res->result_count++;
     }
 }
@@ -145,10 +141,6 @@ static void run_ping_pong_receiver(protocol_adapter_t *adapter,
         }
 
         res->packets_received++;
-
-        int rssi;
-        if (adapter->get_rssi(adapter, &rssi) == ADAPTER_OK)
-            pr->rssi = rssi;
 
         /* Build and send PONG */
         pkt.msg_type = MSG_PONG;
@@ -203,11 +195,13 @@ static void run_flood_sender(protocol_adapter_t *adapter,
         res->result_count++;
 
         if (cfg->inter_packet_us > 0)
-            platform_sleep_ms(cfg->inter_packet_us / 1000);
+            platform_sleep_us(cfg->inter_packet_us);
     }
 }
 
 /* ---- Flood receiver ---- */
+
+#define FLOOD_MAX_CONSECUTIVE_TIMEOUTS 30
 
 static void run_flood_receiver(protocol_adapter_t *adapter,
                                const test_config_t *cfg,
@@ -215,50 +209,62 @@ static void run_flood_receiver(protocol_adapter_t *adapter,
 {
     uint32_t total = cfg->warmup + cfg->repetitions;
     uint8_t rx_buf[BENCH_MAX_PAYLOAD + BENCH_OVERHEAD];
-    uint32_t expected_seq = 0;
+    uint32_t consecutive_timeouts = 0;
+    uint32_t highest_seq = 0;
 
+    /*
+     * Drain approach: receive packets until we get several consecutive
+     * timeouts (meaning the sender is done).  This avoids waiting the
+     * full timeout_ms for every single lost packet.
+     */
     for (uint32_t i = 0; i < total; i++) {
         size_t rx_len = 0;
         int rc = adapter->recv(adapter, rx_buf, sizeof(rx_buf), &rx_len, cfg->timeout_ms);
         uint32_t rx_us = platform_timestamp_us();
 
-        packet_result_t *pr = &res->results[res->result_count];
-        pr->is_warmup = (i < cfg->warmup) ? 1 : 0;
-
         if (rc == ADAPTER_ERR_TIMEOUT || rc == ADAPTER_ERR_RECV) {
-            pr->seq = (uint16_t)(expected_seq & 0xFFFF);
-            pr->lost = 1;
-            res->packets_lost++;
-            expected_seq++;
-            res->result_count++;
-            continue;
+            consecutive_timeouts++;
+            /* After receiving at least one packet, stop on consecutive timeouts */
+            if (res->packets_received > 0 &&
+                consecutive_timeouts >= FLOOD_MAX_CONSECUTIVE_TIMEOUTS) {
+                platform_log("flood_rx: %u consecutive timeouts after %u packets, stopping",
+                             consecutive_timeouts, res->packets_received);
+                break;
+            }
+            continue;  /* Don't record timeout slots — we count loss from seq gaps */
         }
+
+        consecutive_timeouts = 0;
 
         bench_packet_t pkt;
         int dec_rc = bench_packet_decode(rx_buf, rx_len, &pkt);
+
+        packet_result_t *pr = &res->results[res->result_count];
+        pr->is_warmup = (pkt.seq_num < cfg->warmup) ? 1 : 0;
+
         if (dec_rc == -2) {
             pr->crc_ok = 0;
             res->crc_errors++;
+            pr->seq = pkt.seq_num;
         } else if (dec_rc == 0) {
             pr->crc_ok = 1;
             pr->seq = pkt.seq_num;
         } else {
-            pr->lost = 1;
-            res->packets_lost++;
-            res->result_count++;
-            continue;
+            continue;  /* completely garbled — skip */
         }
 
         pr->rx_us = rx_us;
         res->packets_received++;
-        expected_seq = pkt.seq_num + 1;
 
-        int rssi;
-        if (adapter->get_rssi(adapter, &rssi) == ADAPTER_OK)
-            pr->rssi = rssi;
+        if (pkt.seq_num > highest_seq)
+            highest_seq = pkt.seq_num;
 
         res->result_count++;
     }
+
+    /* Count lost packets: total sent (highest_seq+1) minus received */
+    if (res->packets_received > 0 && highest_seq + 1 > res->packets_received)
+        res->packets_lost = (highest_seq + 1) - res->packets_received;
 
     /* Send FLOOD_ACK summary */
     uint8_t tx_buf[BENCH_OVERHEAD];
@@ -271,6 +277,36 @@ static void run_flood_receiver(protocol_adapter_t *adapter,
     int enc_len = bench_packet_encode(&ack, tx_buf, sizeof(tx_buf));
     if (enc_len > 0)
         adapter->send(adapter, tx_buf, (size_t)enc_len);
+}
+
+/* ---- RSSI sampler ---- */
+
+static void run_rssi_sampler(protocol_adapter_t *adapter,
+                             const test_config_t *cfg,
+                             test_results_t *res)
+{
+    uint32_t total = cfg->warmup + cfg->repetitions;
+    uint32_t interval_ms = cfg->inter_packet_us / 1000;
+    if (interval_ms == 0) interval_ms = 100;  /* default 100ms between samples */
+
+    for (uint32_t i = 0; i < total; i++) {
+        packet_result_t *pr = &res->results[res->result_count];
+        pr->seq = (uint16_t)(i & 0xFFFF);
+        pr->is_warmup = (i < cfg->warmup) ? 1 : 0;
+        pr->rx_us = platform_timestamp_us();
+
+        int rssi;
+        if (adapter->get_rssi(adapter, &rssi) == ADAPTER_OK) {
+            pr->rssi = rssi;
+            res->packets_received++;
+        } else {
+            pr->lost = 1;
+            res->packets_lost++;
+        }
+        res->result_count++;
+
+        platform_sleep_ms(interval_ms);
+    }
 }
 
 /* ---- Public API ---- */
@@ -300,6 +336,9 @@ test_results_t *test_engine_run(protocol_adapter_t *adapter,
             run_flood_sender(adapter, cfg, res);
         else
             run_flood_receiver(adapter, cfg, res);
+        break;
+    case TEST_MODE_RSSI:
+        run_rssi_sampler(adapter, cfg, res);
         break;
     default:
         test_results_free(res);
@@ -336,7 +375,8 @@ char *test_results_to_json(const test_results_t *results,
         "  \"packets_lost\": %u,\n"
         "  \"crc_errors\": %u,\n"
         "  \"packets\": [\n",
-        cfg->mode == TEST_MODE_PING_PONG ? "ping_pong" : "flood",
+        cfg->mode == TEST_MODE_PING_PONG ? "ping_pong" :
+        cfg->mode == TEST_MODE_FLOOD     ? "flood"     : "rssi",
         cfg->role == ROLE_SENDER ? "sender" : "receiver",
         cfg->payload_size,
         cfg->repetitions,

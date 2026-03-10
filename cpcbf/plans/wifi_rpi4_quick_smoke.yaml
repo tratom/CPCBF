@@ -2,7 +2,7 @@ global:
   repetitions: 30
   warmup: 3
   timeout_ms: 5000
-  inter_packet_us: 1000000
+  inter_packet_us: 500000
   port: 5201
   channel: 2437
   topology: p2p

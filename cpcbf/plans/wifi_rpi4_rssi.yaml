@@ -1,0 +1,16 @@
+global:
+  repetitions: 100
+  warmup: 5
+  timeout_ms: 2000
+  inter_packet_us: 100000   # 100ms between samples → 10s test
+  port: 5201
+  channel: 2437
+  topology: p2p
+  cooldown_s: 5
+
+tests:
+  - name: wifi_rpi4_rssi
+    mode: rssi
+    protocol: wifi
+    board: rpi4
+    payload_sizes: [0]       # not used for RSSI, but required by schema

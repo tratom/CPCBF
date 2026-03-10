@@ -18,8 +18,9 @@
 
 /* Topology types */
 typedef enum {
-    TOPO_P2P = 0,    /* Wi-Fi Direct (default) */
-    TOPO_ADHOC = 1,  /* Ad-hoc / IBSS */
+    TOPO_P2P = 0,       /* Wi-Fi Direct (default) */
+    TOPO_ADHOC = 1,     /* Ad-hoc / IBSS */
+    TOPO_BLE_L2CAP = 2, /* BLE L2CAP Connection-Oriented Channels */
 } topology_t;
 
 /* Role in the test */

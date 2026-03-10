@@ -13,13 +13,15 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* External adapter from wifi_adapter.c */
+/* External adapters */
 extern protocol_adapter_t wifi_adapter;
+extern protocol_adapter_t ble_adapter;
 
 /* Agent state */
 static adapter_config_t g_adapter_cfg;
 static test_config_t g_test_cfg;
 static test_results_t *g_results = NULL;
+static protocol_adapter_t *g_active_adapter = NULL;
 static int g_configured = 0;
 static int g_adapter_ready = 0;
 
@@ -83,8 +85,17 @@ static void handle_configure(cJSON *params)
     j = cJSON_GetObjectItem(params, "topology");
     if (j && strcmp(j->valuestring, "adhoc") == 0)
         g_adapter_cfg.topology = TOPO_ADHOC;
+    else if (j && strcmp(j->valuestring, "ble_l2cap") == 0)
+        g_adapter_cfg.topology = TOPO_BLE_L2CAP;
     else
         g_adapter_cfg.topology = TOPO_P2P;
+
+    /* Select adapter based on protocol */
+    j = cJSON_GetObjectItem(params, "protocol");
+    if (j && strcmp(j->valuestring, "ble") == 0)
+        g_active_adapter = &ble_adapter;
+    else
+        g_active_adapter = &wifi_adapter;
 
     /* Test config */
     memset(&g_test_cfg, 0, sizeof(g_test_cfg));
@@ -93,6 +104,8 @@ static void handle_configure(cJSON *params)
     j = cJSON_GetObjectItem(params, "mode");
     if (j && strcmp(j->valuestring, "flood") == 0)
         g_test_cfg.mode = TEST_MODE_FLOOD;
+    else if (j && strcmp(j->valuestring, "rssi") == 0)
+        g_test_cfg.mode = TEST_MODE_RSSI;
     else
         g_test_cfg.mode = TEST_MODE_PING_PONG;
 
@@ -144,27 +157,29 @@ static void handle_radio_status(void)
     send_ok("radio status", data);
 }
 
-static void handle_wifi_setup(void)
+static void handle_link_setup(const char *label)
 {
-    if (!g_configured) {
+    if (!g_configured || !g_active_adapter) {
         send_error("not configured");
         return;
     }
 
     /* Tear down any previous adapter state */
     if (g_adapter_ready) {
-        wifi_adapter.deinit(&wifi_adapter);
+        g_active_adapter->deinit(g_active_adapter);
         g_adapter_ready = 0;
     }
 
-    int rc = wifi_adapter.init(&wifi_adapter, &g_adapter_cfg);
+    int rc = g_active_adapter->init(g_active_adapter, &g_adapter_cfg);
     if (rc != ADAPTER_OK) {
         send_error("adapter init failed");
         return;
     }
 
     g_adapter_ready = 1;
-    send_ok("wifi setup complete", NULL);
+    char msg[64];
+    snprintf(msg, sizeof(msg), "%s setup complete", label);
+    send_ok(msg, NULL);
 }
 
 static void handle_start(void)
@@ -180,9 +195,10 @@ static void handle_start(void)
         g_results = NULL;
     }
 
-    /* Initialize adapter if not already done via WIFI_SETUP */
+    /* Initialize adapter if not already done via WIFI_SETUP/BLE_SETUP */
     if (!g_adapter_ready) {
-        int rc = wifi_adapter.init(&wifi_adapter, &g_adapter_cfg);
+        if (!g_active_adapter) g_active_adapter = &wifi_adapter;
+        int rc = g_active_adapter->init(g_active_adapter, &g_adapter_cfg);
         if (rc != ADAPTER_OK) {
             send_error("adapter init failed");
             return;
@@ -195,7 +211,7 @@ static void handle_start(void)
                  g_test_cfg.payload_size, g_test_cfg.repetitions);
 
     /* Run test (blocking) */
-    g_results = test_engine_run(&wifi_adapter, &g_test_cfg);
+    g_results = test_engine_run(g_active_adapter, &g_test_cfg);
 
     if (g_results)
         send_ok("test complete", NULL);
@@ -233,8 +249,8 @@ static void handle_stop(void)
         test_results_free(g_results);
         g_results = NULL;
     }
-    if (g_adapter_ready) {
-        wifi_adapter.deinit(&wifi_adapter);
+    if (g_adapter_ready && g_active_adapter) {
+        g_active_adapter->deinit(g_active_adapter);
         g_adapter_ready = 0;
     }
     g_configured = 0;
@@ -276,7 +292,9 @@ int main(void)
         } else if (strcmp(command, "RADIO_STATUS") == 0) {
             handle_radio_status();
         } else if (strcmp(command, "WIFI_SETUP") == 0) {
-            handle_wifi_setup();
+            handle_link_setup("wifi");
+        } else if (strcmp(command, "BLE_SETUP") == 0) {
+            handle_link_setup("ble");
         } else if (strcmp(command, "START") == 0) {
             handle_start();
         } else if (strcmp(command, "GET_RESULTS") == 0) {
@@ -293,7 +311,8 @@ int main(void)
     /* Cleanup */
     if (g_results)
         test_results_free(g_results);
-    wifi_adapter.deinit(&wifi_adapter);
+    if (g_active_adapter)
+        g_active_adapter->deinit(g_active_adapter);
 
     platform_log("agent exiting");
     return 0;
