@@ -39,7 +39,7 @@ def send_cmd(proc, cmd_dict, timeout=120):
     return json.loads(line)
 
 
-def run_test_plan(role_cfg, plan, label_prefix):
+def run_test_plan(role_cfg, plan, label_prefix, round_num=1):
     """Run one YAML plan through the agent."""
     g = plan["global"]
     for test in plan["tests"]:
@@ -59,18 +59,18 @@ def run_test_plan(role_cfg, plan, label_prefix):
                     "iface_name": "wlan0",
                     "peer_addr": role_cfg["peer_addr"],
                     "peer_mac": role_cfg["peer_mac"],
-                    "port": g["port"],
-                    "channel": g["channel"],
+                    "port": g.get("port", test.get("port", 5201)),
+                    "channel": g.get("channel", test.get("channel", 2437)),
                     "local_ip": role_cfg["local_ip"],
                     "netmask": "255.255.255.0",
                     "role": role_str,
-                    "topology": g.get("topology", "p2p"),
+                    "topology": g.get("topology", test.get("topology", "p2p")),
                     "mode": test["mode"],
                     "payload_size": payload_size,
-                    "repetitions": g["repetitions"],
-                    "warmup": g["warmup"],
-                    "timeout_ms": g["timeout_ms"],
-                    "inter_packet_us": g.get("inter_packet_us", 0),
+                    "repetitions": g.get("repetitions", test.get("repetitions", 100)),
+                    "warmup": g.get("warmup", test.get("warmup", 5)),
+                    "timeout_ms": g.get("timeout_ms", test.get("timeout_ms", 5000)),
+                    "inter_packet_us": g.get("inter_packet_us", test.get("inter_packet_us", 0)),
                 }
                 send_cmd(proc, {"command": "CONFIGURE", "params": params})
 
@@ -88,7 +88,7 @@ def run_test_plan(role_cfg, plan, label_prefix):
                 resp = send_cmd(proc, {"command": "GET_RESULTS"})
 
                 # Save results in ingest.py-compatible format
-                test_name = f"{label_prefix}_{test['name']}_{payload_size}B"
+                test_name = f"{label_prefix}_r{round_num:02d}_{test['name']}_{payload_size}B"
                 result_file = os.path.join(
                     OUTPUT_DIR, f"{test_name}_{role_str}.jsonl"
                 )
@@ -100,9 +100,9 @@ def run_test_plan(role_cfg, plan, label_prefix):
                     "protocol": "wifi",
                     "board": "rpi4",
                     "payload_size": payload_size,
-                    "repetitions": g["repetitions"],
-                    "warmup": g["warmup"],
-                    "topology": g.get("topology", "p2p"),
+                    "repetitions": params["repetitions"],
+                    "warmup": params["warmup"],
+                    "topology": params["topology"],
                     role_str: resp.get("data", {}),
                     "clock_offset_us": None,
                     "timestamp": time.time(),
@@ -126,7 +126,7 @@ def run_test_plan(role_cfg, plan, label_prefix):
                 )
 
             # Cooldown between payload sizes
-            time.sleep(g.get("cooldown_s", 5))
+            time.sleep(g.get("cooldown_s", test.get("cooldown_s", 5)))
 
 
 def restore_network():
@@ -147,12 +147,14 @@ def main():
 
         label = role_cfg.get("label", datetime.datetime.now().strftime("%Y%m%d_%H%M"))
 
-        # Run all YAML plans in the plans directory
+        # Run all YAML plans in the plans directory, repeated for N rounds
+        rounds = role_cfg.get("rounds", 1)
         plan_files = sorted(glob.glob(os.path.join(PLANS_DIR, "*.yaml")))
-        for plan_path in plan_files:
-            with open(plan_path) as f:
-                plan = yaml.safe_load(f)
-            run_test_plan(role_cfg, plan, label)
+        for r in range(1, rounds + 1):
+            for plan_path in plan_files:
+                with open(plan_path) as f:
+                    plan = yaml.safe_load(f)
+                run_test_plan(role_cfg, plan, label, round_num=r)
     finally:
         restore_network()
 

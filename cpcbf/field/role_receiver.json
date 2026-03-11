@@ -3,5 +3,6 @@
     "peer_mac": "de:a6:32:81:87:a0",
     "peer_addr": "192.168.49.1",
     "local_ip": "192.168.49.2",
-    "label": "lab-test"
+    "label": "lab-test",
+    "rounds": 10
 }

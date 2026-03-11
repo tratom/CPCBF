@@ -9,8 +9,10 @@ import yaml
 from .models import GlobalConfig, HostInfo, TestMode, TestPlan, TestSpec
 
 
-def _merge_defaults(global_cfg: GlobalConfig, test_dict: dict) -> dict:
-    """Merge global defaults into a per-test dict (test overrides win)."""
+def _merge_defaults(global_cfg: GlobalConfig, gc_raw: dict, test_dict: dict) -> dict:
+    """Merge global and per-test config.  Explicit global keys win; for keys
+    not set in the YAML global section, per-test values are used, falling back
+    to GlobalConfig dataclass defaults."""
     defaults = {
         "repetitions": global_cfg.repetitions,
         "warmup": global_cfg.warmup,
@@ -21,7 +23,8 @@ def _merge_defaults(global_cfg: GlobalConfig, test_dict: dict) -> dict:
         "topology": global_cfg.topology,
         "cooldown_s": global_cfg.cooldown_s,
     }
-    merged = {**defaults, **test_dict}
+    # Start from dataclass defaults, layer test values, then global overrides
+    merged = {**defaults, **test_dict, **{k: defaults[k] for k in gc_raw if k in defaults}}
     return merged
 
 
@@ -54,7 +57,7 @@ def parse_plan(plan_path: str | Path) -> TestPlan:
     # Parse tests
     tests = []
     for t in raw.get("tests", []):
-        merged = _merge_defaults(global_cfg, t)
+        merged = _merge_defaults(global_cfg, gc_raw, t)
         mode = TestMode(merged.pop("mode"))
         tests.append(TestSpec(mode=mode, **merged))
 

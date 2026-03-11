@@ -109,7 +109,10 @@ def compute_run_stats(conn: sqlite3.Connection, run_id: int) -> RunStats:
             rx_times = rx_df["rx_us"].values.astype(float)
             duration_us = rx_times[-1] - rx_times[0]
             if duration_us > 0:
-                total_bits = len(rx_df) * payload_size * 8
+                # Wire bytes per packet: payload + 14B bench header/CRC
+                # + 8B UDP header + 20B IP header = payload + 42
+                wire_bytes = payload_size + 42
+                total_bits = len(rx_df) * wire_bytes * 8
                 throughput = total_bits / (duration_us / 1e6)  # bits per second
 
     return RunStats(
