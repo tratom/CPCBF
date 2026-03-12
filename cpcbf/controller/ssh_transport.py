@@ -44,7 +44,7 @@ class SSHTransport:
     def start_agent(self, binary_path: str | None = None) -> None:
         """Start the agent binary over SSH."""
         path = binary_path or self.host.agent_binary
-        cmd = f"sudo {path} 2>/tmp/cpcbf_agent.log"
+        cmd = f"sudo -n bash -c '{path} 2>/tmp/cpcbf_agent.log'"
         logger.info("Starting agent: %s", cmd)
 
         self._stdin, self._stdout, _ = self._client.exec_command(

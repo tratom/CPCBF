@@ -1,0 +1,21 @@
+# CPCBF Inventory — Raspberry Pi 4 pair
+# Update hostnames, credentials, and WiFi MACs for your setup.
+
+hosts:
+  rpi4_a:
+    hostname: 192.168.8.20
+    username: pi
+    password: raspberry
+    # key_filename: ~/.ssh/id_rsa
+    wifi_mac: "dc:a6:32:81:07:a0"
+    ble_mac: "DC:A6:32:81:07:A1"
+    agent_binary: /bin/cpcbf_agent
+
+  rpi4_b:
+    hostname: 192.168.8.21
+    username: pi
+    password: raspberry
+    # key_filename: ~/.ssh/id_rsa
+    wifi_mac: "d8:3a:dd:38:36:b7"
+    ble_mac: "D8:3A:DD:38:36:B9"
+    agent_binary: /bin/cpcbf_agent
