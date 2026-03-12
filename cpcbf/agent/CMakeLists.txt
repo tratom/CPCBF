@@ -11,6 +11,7 @@ option(BUILD_RPI4 "Build the RPi4 agent binary" OFF)
 add_library(cpcbf_common STATIC
     common/benchmark_packet.c
     common/test_engine.c
+    common/sync_barrier.c
 )
 target_include_directories(cpcbf_common PUBLIC common)
 

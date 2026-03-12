@@ -7,6 +7,7 @@
 #include "platform_hal.h"
 #include "benchmark_packet.h"
 #include "test_engine.h"
+#include "sync_barrier.h"
 #include "cJSON.h"
 
 #include <stdio.h>
@@ -182,6 +183,26 @@ static void handle_link_setup(const char *label)
     send_ok(msg, NULL);
 }
 
+static void handle_sync(cJSON *params)
+{
+    if (!g_adapter_ready || !g_active_adapter) {
+        send_error("adapter not ready — run WIFI_SETUP/BLE_SETUP first");
+        return;
+    }
+
+    uint32_t timeout_ms = 120000;
+    cJSON *j = cJSON_GetObjectItem(params, "timeout_ms");
+    if (j) timeout_ms = (uint32_t)j->valueint;
+
+    int rc = sync_barrier_wait(g_active_adapter, timeout_ms);
+    if (rc != 0) {
+        send_error("sync timeout — peer not reachable");
+        return;
+    }
+
+    send_ok("sync complete", NULL);
+}
+
 static void handle_start(void)
 {
     if (!g_configured) {
@@ -295,6 +316,8 @@ int main(void)
             handle_link_setup("wifi");
         } else if (strcmp(command, "BLE_SETUP") == 0) {
             handle_link_setup("ble");
+        } else if (strcmp(command, "SYNC") == 0) {
+            handle_sync(params ? params : cJSON_CreateObject());
         } else if (strcmp(command, "START") == 0) {
             handle_start();
         } else if (strcmp(command, "GET_RESULTS") == 0) {

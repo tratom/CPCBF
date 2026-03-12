@@ -77,9 +77,15 @@ def run_test_plan(role_cfg, plan, label_prefix, round_num=1):
                 # WIFI_SETUP (GO creates group, client finds & joins)
                 send_cmd(proc, {"command": "WIFI_SETUP"}, timeout=120)
 
-                # Sender waits 2s for receiver to be ready (not needed for RSSI mode)
-                if role_str == "sender" and test["mode"] != "rssi":
-                    time.sleep(2)
+                # SYNC barrier — both sides exchange beacons before starting
+                sync_resp = send_cmd(
+                    proc,
+                    {"command": "SYNC", "params": {"timeout_ms": 120000}},
+                    timeout=180,
+                )
+                if sync_resp.get("status") != "ok":
+                    print(f"SYNC failed: {sync_resp.get('message', '?')}, skipping test")
+                    continue
 
                 # START (blocking -- runs entire test)
                 send_cmd(proc, {"command": "START"}, timeout=300)

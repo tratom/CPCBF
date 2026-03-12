@@ -247,6 +247,8 @@ SSH into each RPi and copy the `cpcbf/field/` directory:
 # On each RPi:
 cd ~/common-bench/cpcbf/field
 
+# TODO: ADD MAC ADDRESS CHANGE ON THE ROLE JSON FILE after ifconfig --> p2p-wlan0
+
 # On rpi4_a (the GO / sender):
 sudo ./deploy.sh sender
 

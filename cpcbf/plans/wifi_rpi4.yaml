@@ -4,7 +4,7 @@ global:
   port: 5201
   channel: 2437
   topology: p2p
-  cooldown_s: 10
+  cooldown_s: 15
 
 tests:
 
@@ -23,7 +23,7 @@ tests:
     protocol: wifi
     board: rpi4
     repetitions: 300
-    inter_packet_us: 1000000  # 1s between samples → 5min test (300 packets × 1s pacing + receiver drain)
+    inter_packet_us: 500000  # 500 ms between samples → 2.5min test (300 packets × 1s pacing + receiver drain)
     payload_sizes: [32]
 
 # throughput test with no pacing to get max throughput and observe queueing effects at the receiver
@@ -39,7 +39,5 @@ tests:
 # However, due to the 14 byte bench packet header, the max payload size for UDP over Wi-Fi
 # is 1500 - 20 IP header - 8 UDP header - 14 bench header = 1458 bytes
 
-#total exec time ~2 minutes (1010 packets × 0ms pacing + receiver drain)
-
 # total number of packets: 110 (RSSI) + 310 (RTT) + 2010 (flood) = 2430 packets
-# total exec time ~7 minutes (110 packets × 100ms pacing + 300 packets × 1s pacing + 2010 packets × 0ms pacing + receiver drain)
+# total exec time ~8 minutes (110 packets × 100ms pacing + 300 packets × 1s pacing + 2010 packets × 0ms pacing + receiver drain)

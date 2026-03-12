@@ -133,7 +133,17 @@ def plot_loss_bar(db_path: str, output_path: str | Path) -> None:
 
 def plot_rssi_timeseries(db_path: str, output_path: str | Path) -> None:
     """RSSI over sequence number."""
-    df = _load_packets(db_path)
+    conn = sqlite3.connect(db_path)
+    df = pd.read_sql_query(
+        """
+        SELECT p.*, r.test_name, r.mode, r.payload_size, r.protocol, r.board
+        FROM packets p
+        JOIN test_runs r ON p.run_id = r.run_id
+        WHERE p.warmup = 0 AND p.source = 'receiver'
+        """,
+        conn,
+    )
+    conn.close()
     df = df[(df["lost"] == 0) & (df["rssi"] != 0)]
 
     if df.empty:
