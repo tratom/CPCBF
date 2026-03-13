@@ -15,10 +15,12 @@ dependencies = [
     "seaborn>=0.12",
     "scipy>=1.10",
     "jsonschema>=4.17",
+    "psycopg2-binary>=2.9",
 ]
 
 [project.scripts]
 cpcbf = "controller.cli:main"
+cpcbf-ingest = "analysis.ingest:main"
 
 [tool.setuptools.packages.find]
 include = ["controller*", "analysis*"]

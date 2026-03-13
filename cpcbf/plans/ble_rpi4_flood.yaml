@@ -13,6 +13,7 @@ tests:
     mode: flood
     protocol: ble
     board: rpi4
-    payload_sizes: [20, 100, 230]
+    payload_sizes: [20, 100, 237, 1994]
 
-# 244 - 14 (bench header) = 230 bytes max payload for BLE L2CAP
+# The maximum payload size for BLE L2CAP is 251 bytes, but the default MTU is 23 bytes, which leaves 20 bytes for payload. The test includes larger payload sizes to see how the system handles them, even if they may require fragmentation.
+# 251 - 14 (bench header) =  237

@@ -67,6 +67,7 @@ class Orchestrator:
                 "warmup": test.warmup,
                 "timeout_ms": test.timeout_ms,
                 "inter_packet_us": test.inter_packet_us,
+                "ble_phy": {"1m": 1, "2m": 2}.get(test.ble_phy, 1),
             }
 
         local_ip = "192.168.49.1" if is_sender else "192.168.49.2"

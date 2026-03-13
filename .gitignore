@@ -9,6 +9,7 @@ cpcbf/agent/build/
 
 # Config (local credentials)
 *.conf
+.env
 
 # Results (generated data)
 results*

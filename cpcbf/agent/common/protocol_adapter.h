@@ -41,6 +41,7 @@ typedef struct {
     char netmask[16];      /* e.g. "255.255.255.0" */
     adapter_role_t role;
     topology_t topology;
+    uint8_t ble_phy;       /* 1=1M, 2=2M PHY */
 } adapter_config_t;
 
 /* Forward declaration */

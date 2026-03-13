@@ -1,0 +1,20 @@
+global:
+  repetitions: 1000
+  warmup: 10
+  timeout_ms: 5000
+  inter_packet_us: 0
+  port: 128             # L2CAP PSM
+  channel: 0
+  topology: ble_l2cap
+  cooldown_s: 10
+  ble_phy: "2m"
+
+tests:
+  - name: ble_rpi4_flood_2m
+    mode: flood
+    protocol: ble
+    board: rpi4
+    payload_sizes: [20, 100, 237, 1994]
+
+# Same as ble_rpi4_flood.yaml but uses BLE 5.0 2M PHY for ~2x throughput.
+# The RPi4's BCM43455 supports 2M PHY.

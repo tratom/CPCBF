@@ -13,6 +13,17 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+
+/*
+ * Protected JSON output stream.
+ *
+ * We dup the real stdout to a private fd, then redirect fd 1 → stderr.
+ * This way, any subprocess (system(), popen(), bluetoothctl, hcitool, etc.)
+ * inherits fd 1 = stderr, so their output can never pollute the JSON channel.
+ * Only send_response() writes to g_json_out.
+ */
+static FILE *g_json_out = NULL;
 
 /* External adapters */
 extern protocol_adapter_t wifi_adapter;
@@ -36,8 +47,8 @@ static void send_response(const char *status, const char *message, cJSON *data)
         cJSON_AddItemToObject(resp, "data", data);
 
     char *json = cJSON_PrintUnformatted(resp);
-    printf("%s\n", json);
-    fflush(stdout);
+    fprintf(g_json_out, "%s\n", json);
+    fflush(g_json_out);
     free(json);
     cJSON_Delete(resp);
 }
@@ -90,6 +101,10 @@ static void handle_configure(cJSON *params)
         g_adapter_cfg.topology = TOPO_BLE_L2CAP;
     else
         g_adapter_cfg.topology = TOPO_P2P;
+
+    j = cJSON_GetObjectItem(params, "ble_phy");
+    if (j) g_adapter_cfg.ble_phy = (uint8_t)j->valueint;
+    else   g_adapter_cfg.ble_phy = 1;
 
     /* Select adapter based on protocol */
     j = cJSON_GetObjectItem(params, "protocol");
@@ -280,6 +295,12 @@ static void handle_stop(void)
 
 int main(void)
 {
+    /* Protect stdout: save real stdout, then redirect fd 1 → stderr
+     * so that no subprocess can pollute the JSON channel. */
+    int json_fd = dup(STDOUT_FILENO);
+    dup2(STDERR_FILENO, STDOUT_FILENO);
+    g_json_out = fdopen(json_fd, "w");
+
     platform_log("CPCBF agent started on %s", platform_name());
 
     char line[65536];

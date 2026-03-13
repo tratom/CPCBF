@@ -25,6 +25,7 @@ class GlobalConfig:
     channel: int = 2437
     topology: str = "p2p"
     cooldown_s: int = 5
+    ble_phy: str = "1m"
 
 
 @dataclass
@@ -44,6 +45,7 @@ class TestSpec:
     channel: int = 2437
     topology: str = "p2p"
     cooldown_s: int = 5
+    ble_phy: str = "1m"
 
 
 @dataclass

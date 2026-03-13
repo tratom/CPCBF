@@ -7,7 +7,7 @@ hosts:
     username: pi
     password: raspberry
     wifi_mac: "d8:3a:dd:38:36:3c"
-    ble_mac: "DC:A6:32:81:07:A0"   # run `hcitool dev` on rpi4_a to get this
+    ble_mac: "D8:3A:DD:38:36:3E"
     agent_binary: /bin/cpcbf_agent
 
   rpi4_b:
@@ -15,5 +15,5 @@ hosts:
     username: pi
     password: raspberry
     wifi_mac: "d8:3a:dd:3b:86:af"
-    ble_mac: "D8:3A:DD:38:36:B7"   # run `hcitool dev` on rpi4_b to get this
+    ble_mac: "D8:3A:DD:3B:86:B0"
     agent_binary: /bin/cpcbf_agent

@@ -68,11 +68,81 @@ static int ble_reset_adapter(const char *iface_name)
     run_cmd(cmd);
     platform_sleep_ms(500);
 
+    /* Enable Data Length Extension (DLE) — set default TX to max 251 bytes.
+     * HCI LE Write Suggested Default Data Length (ogf=0x08, ocf=0x0024).
+     * Without DLE the controller uses 27-byte PDUs, fragmenting every L2CAP
+     * SDU into tiny chunks and capping throughput at ~130 Kbps.
+     * With DLE (251B PDU) throughput can reach ~800 Kbps at 7.5ms CI. */
+    snprintf(cmd, sizeof(cmd),
+        "hcitool -i %s cmd 0x08 0x0024 FB 00 48 08 2>/dev/null", iface_name);
+    run_cmd(cmd);
+
     /* Restart bluetoothd — needed for bluetoothctl commands */
     run_cmd("systemctl start bluetooth 2>/dev/null");
     platform_sleep_ms(1000);
 
     return 0;
+}
+
+/*
+ * Request optimal link parameters on an active BLE connection.
+ * - DLE per-connection: LE Set Data Length (ogf=0x08, ocf=0x0022)
+ * - Minimum connection interval: 7.5ms via lecup
+ */
+static void ble_optimize_link(const char *iface_name, const char *peer_mac, uint8_t ble_phy)
+{
+    int dev_id = get_hci_dev_id(iface_name);
+    int hci_fd = hci_open_dev(dev_id);
+    if (hci_fd < 0) return;
+
+    struct hci_conn_info_req *cr;
+    cr = malloc(sizeof(*cr) + sizeof(struct hci_conn_info));
+    if (!cr) { hci_close_dev(hci_fd); return; }
+
+    str2ba(peer_mac, &cr->bdaddr);
+    cr->type = LE_LINK;
+    if (ioctl(hci_fd, HCIGETCONNINFO, cr) != 0) {
+        platform_log("Could not get BLE conn handle for %s", peer_mac);
+        free(cr);
+        hci_close_dev(hci_fd);
+        return;
+    }
+    uint16_t handle = cr->conn_info->handle;
+    free(cr);
+
+    char cmd[256];
+
+    /* DLE per-connection: request 251-byte TX PDUs.
+     * LE Set Data Length: handle, TxOctets=0x00FB(251), TxTime=0x0848(2120us) */
+    snprintf(cmd, sizeof(cmd),
+        "hcitool -i %s cmd 0x08 0x0022 %02x %02x FB 00 48 08 2>/dev/null",
+        iface_name, handle & 0xFF, (handle >> 8) & 0xFF);
+    run_cmd(cmd);
+
+    /* Request minimum connection interval (7.5ms = 6 × 1.25ms) */
+    snprintf(cmd, sizeof(cmd),
+        "hcitool -i %s lecup --handle %d --min 6 --max 6 --latency 0 --timeout 200 2>/dev/null",
+        iface_name, handle);
+    run_cmd(cmd);
+
+    /* Allow time for parameter negotiation */
+    platform_sleep_ms(500);
+
+    /* Switch to 2M PHY if requested.
+     * LE Set PHY (ogf=0x08, ocf=0x0032):
+     *   handle(2B), ALL_PHYS=0x00, TX_PHYS=0x02(2M), RX_PHYS=0x02(2M), PHY_Options=0x0000 */
+    if (ble_phy == 2) {
+        snprintf(cmd, sizeof(cmd),
+            "hcitool -i %s cmd 0x08 0x0032 %02x %02x 00 02 02 00 00 2>/dev/null",
+            iface_name, handle & 0xFF, (handle >> 8) & 0xFF);
+        run_cmd(cmd);
+        platform_sleep_ms(500);
+        platform_log("BLE 2M PHY requested on handle=%d", handle);
+    }
+
+    platform_log("BLE link optimized: handle=%d, DLE=251B, CI=7.5ms, PHY=%s",
+                 handle, ble_phy == 2 ? "2M" : "1M");
+    hci_close_dev(hci_fd);
 }
 
 /* Set up as peripheral: advertise and accept L2CAP CoC connection. */
@@ -170,6 +240,9 @@ static int setup_peripheral(const adapter_config_t *cfg, int *l2cap_fd)
 
     *l2cap_fd = client_fd;
 
+    /* Optimize link: enable DLE + min connection interval + optional 2M PHY */
+    ble_optimize_link(cfg->iface_name, peer_str, cfg->ble_phy);
+
     /* Wait for link stabilization */
     platform_log("Waiting 2s for BLE link stabilization...");
     platform_sleep_ms(2000);
@@ -194,15 +267,13 @@ static int setup_central(const adapter_config_t *cfg, int *l2cap_fd)
     for (int attempt = 0; attempt < 6; attempt++) {
         platform_log("BLE scan attempt %d/6...", attempt + 1);
 
-        /* Start LE scan */
-        run_cmd("bluetoothctl scan on &");
-        platform_sleep_ms(5000);
-        run_cmd("bluetoothctl scan off 2>/dev/null");
+        /* Start LE scan — redirect ALL output to stderr to keep stdout clean */
+        run_cmd("bluetoothctl --timeout 5 scan on >/dev/null 2>&1");
 
         /* Check if peer is visible */
         char check_cmd[128];
         snprintf(check_cmd, sizeof(check_cmd),
-            "bluetoothctl devices | grep -i '%s'", cfg->peer_mac);
+            "bluetoothctl devices 2>/dev/null | grep -qi '%s'", cfg->peer_mac);
         if (system(check_cmd) == 0) {
             platform_log("Found peer device %s", cfg->peer_mac);
             found = 1;
@@ -290,33 +361,10 @@ static int setup_central(const adapter_config_t *cfg, int *l2cap_fd)
 
     platform_log("BLE L2CAP connected to %s", cfg->peer_mac);
 
-    /* Request minimum connection interval (7.5ms) for accurate RTT */
-    int dev_id = get_hci_dev_id(cfg->iface_name);
-    int hci_fd = hci_open_dev(dev_id);
-    if (hci_fd >= 0) {
-        /* Get connection handle */
-        struct hci_conn_info_req *cr;
-        cr = malloc(sizeof(*cr) + sizeof(struct hci_conn_info));
-        if (cr) {
-            str2ba(cfg->peer_mac, &cr->bdaddr);
-            cr->type = LE_LINK;
-            if (ioctl(hci_fd, HCIGETCONNINFO, cr) == 0) {
-                uint16_t handle = cr->conn_info->handle;
-                /* Request connection parameter update:
-                 * min_interval=6 (7.5ms), max_interval=6 (7.5ms),
-                 * latency=0, supervision_timeout=200 (2000ms) */
-                char update_cmd[256];
-                snprintf(update_cmd, sizeof(update_cmd),
-                    "hcitool -i %s lecup --handle %d --min 6 --max 6 --latency 0 --timeout 200 2>/dev/null",
-                    cfg->iface_name, handle);
-                run_cmd(update_cmd);
-            }
-            free(cr);
-        }
-        hci_close_dev(hci_fd);
-    }
-
     *l2cap_fd = sock_fd;
+
+    /* Optimize link: enable DLE + min connection interval + optional 2M PHY */
+    ble_optimize_link(cfg->iface_name, cfg->peer_mac, cfg->ble_phy);
 
     /* Wait for link stabilization */
     platform_log("Waiting 2s for BLE link stabilization...");

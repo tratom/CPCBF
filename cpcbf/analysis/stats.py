@@ -38,10 +38,10 @@ def compute_run_stats(conn: sqlite3.Connection, run_id: int) -> RunStats:
     """Compute summary statistics for a single test run."""
     # Get run metadata
     meta = conn.execute(
-        "SELECT test_name, mode, payload_size, repetitions FROM test_runs WHERE run_id = ?",
+        "SELECT test_name, mode, payload_size, repetitions, protocol FROM test_runs WHERE run_id = ?",
         (run_id,),
     ).fetchone()
-    test_name, mode, payload_size, repetitions = meta
+    test_name, mode, payload_size, repetitions, protocol = meta
 
     # For ping_pong, use sender packets (has RTT). For flood, use receiver packets.
     source = "sender" if mode == "ping_pong" else "receiver"
@@ -109,9 +109,11 @@ def compute_run_stats(conn: sqlite3.Connection, run_id: int) -> RunStats:
             rx_times = rx_df["rx_us"].values.astype(float)
             duration_us = rx_times[-1] - rx_times[0]
             if duration_us > 0:
-                # Wire bytes per packet: payload + 14B bench header/CRC
-                # + 8B UDP header + 20B IP header = payload + 42
-                wire_bytes = payload_size + 42
+                # Wire bytes per packet depends on protocol:
+                # WiFi (UDP): payload + 14B bench hdr/CRC + 8B UDP + 20B IP = payload + 42
+                # BLE (L2CAP CoC): payload + 14B bench hdr/CRC (no IP/UDP layer)
+                overhead = 14 if protocol == "ble" else 42
+                wire_bytes = payload_size + overhead
                 total_bits = len(rx_df) * wire_bytes * 8
                 throughput = total_bits / (duration_us / 1e6)  # bits per second
 

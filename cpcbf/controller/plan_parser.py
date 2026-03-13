@@ -22,6 +22,7 @@ def _merge_defaults(global_cfg: GlobalConfig, gc_raw: dict, test_dict: dict) -> 
         "channel": global_cfg.channel,
         "topology": global_cfg.topology,
         "cooldown_s": global_cfg.cooldown_s,
+        "ble_phy": global_cfg.ble_phy,
     }
     # Start from dataclass defaults, layer test values, then global overrides
     merged = {**defaults, **test_dict, **{k: defaults[k] for k in gc_raw if k in defaults}}
