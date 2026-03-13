@@ -11,6 +11,7 @@ cpcbf/agent/build/
 *.conf
 
 # Results (generated data)
+results*
 results/
 *.db
 

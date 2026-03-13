@@ -25,7 +25,6 @@ def init_db(db_path: str | Path) -> sqlite3.Connection:
             topology TEXT,
             clock_offset_us REAL,
             timestamp REAL NOT NULL
-            validated INTEGER DEFAULT 0
         );
 
         CREATE TABLE IF NOT EXISTS packets (

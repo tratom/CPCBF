@@ -42,7 +42,7 @@ class RadioIsolation:
 
             if self._protocol == "wifi":
                 self._disable_subsystem(host_id, "bluetooth")
-            elif self._protocol == "bluetooth":
+            elif self._protocol in ("bluetooth", "ble"):
                 self._disable_subsystem(host_id, "wifi")
 
             # Verify
@@ -54,7 +54,7 @@ class RadioIsolation:
                     raise RuntimeError(
                         f"Bluetooth still active on {host_id} during WiFi test"
                     )
-            elif self._protocol == "bluetooth":
+            elif self._protocol in ("bluetooth", "ble"):
                 if status.get("wifi_active", False):
                     raise RuntimeError(
                         f"WiFi still active on {host_id} during Bluetooth test"

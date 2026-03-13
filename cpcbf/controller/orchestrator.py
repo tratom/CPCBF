@@ -141,31 +141,49 @@ class Orchestrator:
 
         # 4. Set up link (protocol-dependent order)
         if test.protocol == "ble":
-            # BLE: receiver (peripheral/advertiser) first, then sender (central)
+            # BLE: both sides in parallel — peripheral advertises + accepts
+            # while central scans + connects. Sequential won't work because
+            # accept() on the peripheral blocks until the central connects.
             setup_cmd = "BLE_SETUP"
-            first_id, second_id = receiver_id, sender_id
-            first_label, second_label = "receiver (peripheral)", "sender (central)"
+            logger.info("Setting up BLE on both sides in parallel...")
+
+            def setup_agent(host_id: str) -> dict:
+                return manager.send(
+                    host_id, {"command": setup_cmd}, timeout=90.0
+                )
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                receiver_future = pool.submit(setup_agent, receiver_id)
+                time.sleep(2)  # give peripheral time to start advertising
+                sender_future = pool.submit(setup_agent, sender_id)
+
+                receiver_resp = receiver_future.result()
+                sender_resp = sender_future.result()
+
+            if receiver_resp.get("status") != "ok":
+                logger.error("BLE setup failed on receiver (peripheral): %s", receiver_resp)
+                return None
+            if sender_resp.get("status") != "ok":
+                logger.error("BLE setup failed on sender (central): %s", sender_resp)
+                return None
         else:
-            # WiFi: sender (GO) first, then receiver (client)
+            # WiFi: sender (GO) first, then receiver (client) — sequential
             setup_cmd = "WIFI_SETUP"
-            first_id, second_id = sender_id, receiver_id
-            first_label, second_label = "sender (GO)", "receiver (client)"
+            logger.info("Setting up Wi-Fi on sender (GO)...")
+            resp = manager.send(
+                sender_id, {"command": setup_cmd}, timeout=90.0
+            )
+            if resp.get("status") != "ok":
+                logger.error("WiFi setup failed on sender (GO): %s", resp)
+                return None
 
-        logger.info("Setting up %s on %s...", test.protocol, first_label)
-        resp = manager.send(
-            first_id, {"command": setup_cmd}, timeout=90.0
-        )
-        if resp.get("status") != "ok":
-            logger.error("%s setup failed on %s: %s", test.protocol, first_label, resp)
-            return None
-
-        logger.info("Setting up %s on %s...", test.protocol, second_label)
-        resp = manager.send(
-            second_id, {"command": setup_cmd}, timeout=90.0
-        )
-        if resp.get("status") != "ok":
-            logger.error("%s setup failed on %s: %s", test.protocol, second_label, resp)
-            return None
+            logger.info("Setting up Wi-Fi on receiver (client)...")
+            resp = manager.send(
+                receiver_id, {"command": setup_cmd}, timeout=90.0
+            )
+            if resp.get("status") != "ok":
+                logger.error("WiFi setup failed on receiver (client): %s", resp)
+                return None
 
         logger.info("%s link established, starting test...", test.protocol.upper())
 
