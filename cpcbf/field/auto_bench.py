@@ -39,97 +39,161 @@ def send_cmd(proc, cmd_dict, timeout=120):
     return json.loads(line)
 
 
+MAX_RETRIES = 3
+
+
+def _kill_agent(proc, protocol):
+    """Stop agent cleanly and restart NetworkManager if needed."""
+    try:
+        send_cmd(proc, {"command": "STOP"}, timeout=10)
+    except Exception:
+        pass
+    proc.terminate()
+    proc.wait()
+    if protocol != "ble":
+        subprocess.run(
+            ["systemctl", "start", "NetworkManager"],
+            capture_output=True, timeout=10,
+        )
+
+
+def _build_params(role_cfg, plan_global, test, payload_size):
+    """Build CONFIGURE params from role config and plan."""
+    g = plan_global
+    role_str = role_cfg["role"]
+    protocol = test.get("protocol", "wifi")
+    topology = g.get("topology", test.get("topology",
+                     "ble_l2cap" if protocol == "ble" else "p2p"))
+
+    common = {
+        "role": role_str,
+        "topology": topology,
+        "mode": test["mode"],
+        "payload_size": payload_size,
+        "repetitions": g.get("repetitions", test.get("repetitions", 100)),
+        "warmup": g.get("warmup", test.get("warmup", 5)),
+        "timeout_ms": g.get("timeout_ms", test.get("timeout_ms", 5000)),
+        "inter_packet_us": g.get("inter_packet_us", test.get("inter_packet_us", 0)),
+    }
+
+    if protocol == "ble":
+        common.update({
+            "iface_name": "hci0",
+            "peer_addr": "",
+            "peer_mac": role_cfg["ble_mac_peer"],
+            "port": g.get("port", test.get("port", 128)),
+            "channel": 0,
+            "essid": "",
+            "local_ip": "",
+            "netmask": "",
+            "protocol": "ble",
+        })
+    else:
+        common.update({
+            "iface_name": "wlan0",
+            "peer_addr": role_cfg["peer_addr"],
+            "peer_mac": role_cfg["peer_mac"],
+            "port": g.get("port", test.get("port", 5201)),
+            "channel": g.get("channel", test.get("channel", 2437)),
+            "local_ip": role_cfg["local_ip"],
+            "netmask": "255.255.255.0",
+        })
+
+    return common
+
+
 def run_test_plan(role_cfg, plan, label_prefix, round_num=1):
     """Run one YAML plan through the agent."""
     g = plan["global"]
     for test in plan["tests"]:
         for payload_size in test["payload_sizes"]:
-            # Start agent process
-            proc = subprocess.Popen(
-                ["sudo", AGENT_BIN],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=open("/tmp/cpcbf_agent.log", "a"),
-                text=True,
-            )
-            try:
-                # CONFIGURE
-                role_str = role_cfg["role"]
-                params = {
-                    "iface_name": "wlan0",
-                    "peer_addr": role_cfg["peer_addr"],
-                    "peer_mac": role_cfg["peer_mac"],
-                    "port": g.get("port", test.get("port", 5201)),
-                    "channel": g.get("channel", test.get("channel", 2437)),
-                    "local_ip": role_cfg["local_ip"],
-                    "netmask": "255.255.255.0",
-                    "role": role_str,
-                    "topology": g.get("topology", test.get("topology", "p2p")),
-                    "mode": test["mode"],
-                    "payload_size": payload_size,
-                    "repetitions": g.get("repetitions", test.get("repetitions", 100)),
-                    "warmup": g.get("warmup", test.get("warmup", 5)),
-                    "timeout_ms": g.get("timeout_ms", test.get("timeout_ms", 5000)),
-                    "inter_packet_us": g.get("inter_packet_us", test.get("inter_packet_us", 0)),
-                }
-                send_cmd(proc, {"command": "CONFIGURE", "params": params})
+            role_str = role_cfg["role"]
+            protocol = test.get("protocol", "wifi")
+            params = _build_params(role_cfg, g, test, payload_size)
+            setup_cmd = "BLE_SETUP" if protocol == "ble" else "WIFI_SETUP"
 
-                # WIFI_SETUP (GO creates group, client finds & joins)
-                send_cmd(proc, {"command": "WIFI_SETUP"}, timeout=120)
-
-                # SYNC barrier — both sides exchange beacons before starting
-                sync_resp = send_cmd(
-                    proc,
-                    {"command": "SYNC", "params": {"timeout_ms": 120000}},
-                    timeout=180,
+            # Retry loop — on link/sync failure, both sides retry the
+            # same test with a fresh agent so they stay aligned.
+            success = False
+            for attempt in range(1, MAX_RETRIES + 1):
+                proc = subprocess.Popen(
+                    ["sudo", AGENT_BIN],
+                    stdin=subprocess.PIPE,
+                    stdout=subprocess.PIPE,
+                    stderr=open("/tmp/cpcbf_agent.log", "a"),
+                    text=True,
                 )
-                if sync_resp.get("status") != "ok":
-                    print(f"SYNC failed: {sync_resp.get('message', '?')}, skipping test")
-                    continue
-
-                # START (blocking -- runs entire test)
-                send_cmd(proc, {"command": "START"}, timeout=300)
-
-                # GET_RESULTS
-                resp = send_cmd(proc, {"command": "GET_RESULTS"})
-
-                # Save results in ingest.py-compatible format
-                test_name = f"{label_prefix}_r{round_num:02d}_{test['name']}_{payload_size}B"
-                result_file = os.path.join(
-                    OUTPUT_DIR, f"{test_name}_{role_str}.jsonl"
-                )
-                # Match orchestrator.py output format exactly:
-                # sender/receiver contain the full agent data dict
-                record = {
-                    "test_name": test_name,
-                    "mode": test["mode"],
-                    "protocol": "wifi",
-                    "board": "rpi4",
-                    "payload_size": payload_size,
-                    "repetitions": params["repetitions"],
-                    "warmup": params["warmup"],
-                    "topology": params["topology"],
-                    role_str: resp.get("data", {}),
-                    "clock_offset_us": None,
-                    "timestamp": time.time(),
-                }
-                with open(result_file, "w") as f:
-                    json.dump(record, f)
-                    f.write("\n")
-
-            finally:
-                # Send STOP first so agent runs wifi_teardown (restarts NetworkManager)
                 try:
-                    send_cmd(proc, {"command": "STOP"}, timeout=10)
-                except Exception:
-                    pass
-                proc.terminate()
-                proc.wait()
-                # Safety net: always restart NetworkManager in case agent didn't
-                subprocess.run(
-                    ["systemctl", "start", "NetworkManager"],
-                    capture_output=True, timeout=10,
-                )
+                    # CONFIGURE
+                    send_cmd(proc, {"command": "CONFIGURE", "params": params})
+
+                    # Link setup
+                    setup_resp = send_cmd(proc, {"command": setup_cmd}, timeout=120)
+                    if setup_resp.get("status") != "ok":
+                        print(f"[attempt {attempt}/{MAX_RETRIES}] "
+                              f"{setup_cmd} failed: {setup_resp.get('message', '?')}")
+                        continue
+
+                    # Pre-test SYNC
+                    sync_resp = send_cmd(
+                        proc,
+                        {"command": "SYNC", "params": {"timeout_ms": 120000}},
+                        timeout=180,
+                    )
+                    if sync_resp.get("status") != "ok":
+                        print(f"[attempt {attempt}/{MAX_RETRIES}] "
+                              f"SYNC failed: {sync_resp.get('message', '?')}")
+                        continue
+
+                    # START (blocking)
+                    send_cmd(proc, {"command": "START"}, timeout=300)
+
+                    # GET_RESULTS
+                    resp = send_cmd(proc, {"command": "GET_RESULTS"})
+
+                    # Post-test SYNC — wait for peer to also finish
+                    send_cmd(
+                        proc,
+                        {"command": "SYNC", "params": {"timeout_ms": 120000}},
+                        timeout=180,
+                    )
+
+                    # Save results
+                    test_name = (f"{label_prefix}_r{round_num:02d}"
+                                 f"_{test['name']}_{payload_size}B")
+                    result_file = os.path.join(
+                        OUTPUT_DIR, f"{test_name}_{role_str}.jsonl"
+                    )
+                    record = {
+                        "test_name": test_name,
+                        "mode": test["mode"],
+                        "protocol": protocol,
+                        "board": test.get("board", "rpi4"),
+                        "payload_size": payload_size,
+                        "repetitions": params["repetitions"],
+                        "warmup": params["warmup"],
+                        "topology": params["topology"],
+                        role_str: resp.get("data", {}),
+                        "clock_offset_us": None,
+                        "timestamp": time.time(),
+                    }
+                    with open(result_file, "w") as f:
+                        json.dump(record, f)
+                        f.write("\n")
+
+                    success = True
+                    break  # test succeeded, move to next payload/test
+
+                except Exception as e:
+                    print(f"[attempt {attempt}/{MAX_RETRIES}] "
+                          f"exception: {e}")
+
+                finally:
+                    _kill_agent(proc, protocol)
+
+            if not success:
+                print(f"FAILED after {MAX_RETRIES} attempts: "
+                      f"{test['name']} payload={payload_size}")
 
             # Cooldown between payload sizes
             time.sleep(g.get("cooldown_s", test.get("cooldown_s", 5)))

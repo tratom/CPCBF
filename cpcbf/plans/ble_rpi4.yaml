@@ -1,0 +1,42 @@
+global:
+  warmup: 10
+  timeout_ms: 2000
+  port: 128
+  channel: 207
+  topology: ple_l2cap
+  cooldown_s: 15
+  # ble_phy: "2m" not supported by the CYW43455 chip on rpi4 (check with sudo btmgmt phy)
+
+tests:
+
+# RSSI test with 100ms pacing to get stable RSSI readings without queueing effects
+  - name: ble_rpi4_rssi
+    mode: rssi
+    protocol: ble
+    board: rpi4
+    repetitions: 100
+    inter_packet_us: 100000   # 100ms between samples → 10s test
+    payload_sizes: [0]        # not used for RSSI, but required by schema
+
+# latency test with 1s pacing to avoid queueing and get clean RTT measurements
+  - name: ble_rpi4_rtt
+    mode: ping_pong
+    protocol: ble
+    board: rpi4
+    repetitions: 300
+    inter_packet_us: 500000  # 500 ms between samples → 2.5min test (300 packets × 0.5s pacing + receiver drain)
+    payload_sizes: [32]
+
+# throughput test with no pacing to get max throughput and observe queueing effects at the receiver
+  - name: ble_rpi4_flood
+    mode: flood
+    protocol: ble
+    board: rpi4
+    repetitions: 2000
+    inter_packet_us: 0
+    payload_sizes: [231]
+
+# Max unfragmented payload: 251 (DLE) - 6 (L2CAP CoC header) - 14 (bench header+CRC) = 231
+
+# total number of packets: 110 (RSSI) + 310 (RTT) + 2010 (flood) = 2430 packets
+# total exec time ~8 minutes (110 packets × 100ms pacing + 300 packets × 0.5s pacing + 2010 packets × 0ms pacing + receiver drain)

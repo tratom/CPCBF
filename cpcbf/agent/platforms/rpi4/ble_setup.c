@@ -54,6 +54,11 @@ static int get_hci_dev_id(const char *iface_name)
 /* Reset and bring up the BLE adapter. */
 static int ble_reset_adapter(const char *iface_name)
 {
+    /* Unblock Bluetooth radio — may have been soft-blocked by radio isolation
+     * from a previous WiFi test or by rfkill during a failed run */
+    run_cmd("rfkill unblock bluetooth 2>/dev/null");
+    platform_sleep_ms(200);
+
     /* Stop bluetoothd temporarily to get raw HCI access if needed */
     run_cmd("systemctl stop bluetooth 2>/dev/null");
     platform_sleep_ms(500);
@@ -65,7 +70,12 @@ static int ble_reset_adapter(const char *iface_name)
     platform_sleep_ms(500);
 
     snprintf(cmd, sizeof(cmd), "hciconfig %s up 2>/dev/null", iface_name);
-    run_cmd(cmd);
+    if (run_cmd(cmd) != 0) {
+        /* Retry once after a longer pause — BCM43455 sometimes needs more
+         * recovery time after reset */
+        platform_sleep_ms(2000);
+        run_cmd(cmd);
+    }
     platform_sleep_ms(500);
 
     /* Enable Data Length Extension (DLE) — set default TX to max 251 bytes.
@@ -287,48 +297,7 @@ static int setup_central(const adapter_config_t *cfg, int *l2cap_fd)
         /* Continue anyway — the peer may still be connectable */
     }
 
-    /* Create L2CAP client socket */
-    int sock_fd = socket(PF_BLUETOOTH, SOCK_SEQPACKET, BTPROTO_L2CAP);
-    if (sock_fd < 0) {
-        platform_log("L2CAP socket() failed: %s", strerror(errno));
-        return -1;
-    }
-
-    /* Set BLE L2CAP CoC options */
-    struct l2cap_options opts;
-    memset(&opts, 0, sizeof(opts));
-    socklen_t optlen = sizeof(opts);
-    getsockopt(sock_fd, SOL_L2CAP, L2CAP_OPTIONS, &opts, &optlen);
-    opts.imtu = BLE_L2CAP_MTU;
-    opts.omtu = BLE_L2CAP_MTU;
-    setsockopt(sock_fd, SOL_L2CAP, L2CAP_OPTIONS, &opts, sizeof(opts));
-
-    /* Set security level */
-    struct bt_security sec;
-    memset(&sec, 0, sizeof(sec));
-    sec.level = BT_SECURITY_LOW;
-    setsockopt(sock_fd, SOL_BLUETOOTH, BT_SECURITY, &sec, sizeof(sec));
-
-    /* Bind to local adapter */
-    struct sockaddr_l2 local_addr;
-    memset(&local_addr, 0, sizeof(local_addr));
-    local_addr.l2_family = AF_BLUETOOTH;
-    local_addr.l2_bdaddr = *BDADDR_ANY;
-    local_addr.l2_bdaddr_type = BDADDR_LE_PUBLIC;
-
-    if (bind(sock_fd, (struct sockaddr *)&local_addr, sizeof(local_addr)) < 0) {
-        platform_log("L2CAP bind() failed: %s", strerror(errno));
-        close(sock_fd);
-        return -1;
-    }
-
-    /* Set connect timeout */
-    struct timeval tv;
-    tv.tv_sec = BLE_CONNECT_TIMEOUT_S;
-    tv.tv_usec = 0;
-    setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
-
-    /* Connect to peer */
+    /* Peer address — prepared once, reused across retries */
     struct sockaddr_l2 peer_addr;
     memset(&peer_addr, 0, sizeof(peer_addr));
     peer_addr.l2_family = AF_BLUETOOTH;
@@ -338,24 +307,76 @@ static int setup_central(const adapter_config_t *cfg, int *l2cap_fd)
 
     platform_log("Connecting to %s on PSM %d...", cfg->peer_mac, cfg->port);
 
-    /* Retry connect with backoff */
+    /* Retry connect with fresh socket each time.
+     * After a failed connect() the socket enters an error state (especially
+     * ENOSYS / EINVAL from the BLE stack not being ready yet), so we must
+     * close and recreate it before retrying. */
+    int sock_fd = -1;
     int connected = 0;
     for (int attempt = 0; attempt < 10; attempt++) {
+        /* Create a fresh L2CAP CoC socket */
+        sock_fd = socket(PF_BLUETOOTH, SOCK_SEQPACKET, BTPROTO_L2CAP);
+        if (sock_fd < 0) {
+            platform_log("L2CAP socket() failed: %s", strerror(errno));
+            platform_sleep_ms(1000);
+            continue;
+        }
+
+        /* Set BLE L2CAP CoC options */
+        struct l2cap_options opts;
+        memset(&opts, 0, sizeof(opts));
+        socklen_t optlen = sizeof(opts);
+        getsockopt(sock_fd, SOL_L2CAP, L2CAP_OPTIONS, &opts, &optlen);
+        opts.imtu = BLE_L2CAP_MTU;
+        opts.omtu = BLE_L2CAP_MTU;
+        setsockopt(sock_fd, SOL_L2CAP, L2CAP_OPTIONS, &opts, sizeof(opts));
+
+        /* Set security level */
+        struct bt_security sec;
+        memset(&sec, 0, sizeof(sec));
+        sec.level = BT_SECURITY_LOW;
+        setsockopt(sock_fd, SOL_BLUETOOTH, BT_SECURITY, &sec, sizeof(sec));
+
+        /* Bind to local adapter */
+        struct sockaddr_l2 local_addr;
+        memset(&local_addr, 0, sizeof(local_addr));
+        local_addr.l2_family = AF_BLUETOOTH;
+        local_addr.l2_bdaddr = *BDADDR_ANY;
+        local_addr.l2_bdaddr_type = BDADDR_LE_PUBLIC;
+
+        if (bind(sock_fd, (struct sockaddr *)&local_addr, sizeof(local_addr)) < 0) {
+            platform_log("L2CAP bind() failed: %s", strerror(errno));
+            close(sock_fd);
+            sock_fd = -1;
+            platform_sleep_ms(1000);
+            continue;
+        }
+
+        /* Set connect timeout */
+        struct timeval tv;
+        tv.tv_sec = BLE_CONNECT_TIMEOUT_S;
+        tv.tv_usec = 0;
+        setsockopt(sock_fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+
         if (connect(sock_fd, (struct sockaddr *)&peer_addr, sizeof(peer_addr)) == 0) {
             connected = 1;
             break;
         }
+
         platform_log("L2CAP connect attempt %d failed: %s", attempt + 1, strerror(errno));
+        close(sock_fd);
+        sock_fd = -1;
+
         if (errno == EHOSTUNREACH || errno == ECONNREFUSED) {
             platform_sleep_ms(3000);
         } else {
-            platform_sleep_ms(1000);
+            platform_sleep_ms(2000);
         }
     }
 
     if (!connected) {
         platform_log("L2CAP connect() to %s failed after retries", cfg->peer_mac);
-        close(sock_fd);
+        if (sock_fd >= 0) close(sock_fd);
         return -1;
     }
 

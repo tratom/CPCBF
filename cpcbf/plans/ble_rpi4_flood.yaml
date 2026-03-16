@@ -1,19 +1,19 @@
 global:
-  repetitions: 1000
+  repetitions: 1500
   warmup: 10
   timeout_ms: 5000
   inter_packet_us: 0
   port: 128             # L2CAP PSM
   channel: 0
   topology: ble_l2cap
-  cooldown_s: 10
+  cooldown_s: 20
 
 tests:
   - name: ble_rpi4_flood
     mode: flood
     protocol: ble
     board: rpi4
-    payload_sizes: [20, 100, 237, 1994]
+    payload_sizes: [20, 100, 231, 1458]
 
-# The maximum payload size for BLE L2CAP is 251 bytes, but the default MTU is 23 bytes, which leaves 20 bytes for payload. The test includes larger payload sizes to see how the system handles them, even if they may require fragmentation.
-# 251 - 14 (bench header) =  237
+# Max unfragmented payload: 251 (DLE) - 6 (L2CAP CoC header) - 14 (bench header+CRC) = 231
+# 1994 tests L2CAP segmentation (fragments across multiple LL PDUs)
