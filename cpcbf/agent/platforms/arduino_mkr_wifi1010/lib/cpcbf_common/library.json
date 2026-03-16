@@ -1,0 +1,7 @@
+{
+    "name": "cpcbf_common",
+    "version": "0.1.0",
+    "build": {
+        "flags": "-DBENCH_MAX_PAYLOAD=512"
+    }
+}

@@ -23,6 +23,7 @@ def _merge_defaults(global_cfg: GlobalConfig, gc_raw: dict, test_dict: dict) -> 
         "topology": global_cfg.topology,
         "cooldown_s": global_cfg.cooldown_s,
         "ble_phy": global_cfg.ble_phy,
+        "essid": global_cfg.essid,
     }
     # Start from dataclass defaults, layer test values, then global overrides
     merged = {**defaults, **test_dict, **{k: defaults[k] for k in gc_raw if k in defaults}}
@@ -38,11 +39,12 @@ def _validate_plan(plan: TestPlan) -> None:
                 f"Test '{test.name}': minimum 30 repetitions required, got {test.repetitions}"
             )
 
-        # Payload sizes must be positive
+        # Payload sizes must be in valid range for the target board
+        max_payload = 512 if test.board == "mkr_wifi_1010" else 8192
         for size in test.payload_sizes:
-            if size < 0 or size > 8192:
+            if size < 0 or size > max_payload:
                 raise ValueError(
-                    f"Test '{test.name}': payload size {size} out of range [0, 8192]"
+                    f"Test '{test.name}': payload size {size} out of range [0, {max_payload}]"
                 )
 
 

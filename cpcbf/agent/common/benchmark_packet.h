@@ -16,7 +16,9 @@
 #define BENCH_HEADER_LEN 10
 #define BENCH_CRC_LEN    4
 #define BENCH_OVERHEAD    (BENCH_HEADER_LEN + BENCH_CRC_LEN) /* 14 */
+#ifndef BENCH_MAX_PAYLOAD
 #define BENCH_MAX_PAYLOAD 8192
+#endif
 
 /* Message types */
 #define MSG_PING      0x01

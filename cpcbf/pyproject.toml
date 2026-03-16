@@ -16,6 +16,7 @@ dependencies = [
     "scipy>=1.10",
     "jsonschema>=4.17",
     "psycopg2-binary>=2.9",
+    "pyserial>=3.5",
 ]
 
 [project.scripts]

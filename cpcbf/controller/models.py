@@ -26,6 +26,7 @@ class GlobalConfig:
     topology: str = "p2p"
     cooldown_s: int = 5
     ble_phy: str = "1m"
+    essid: str = ""
 
 
 @dataclass
@@ -46,6 +47,7 @@ class TestSpec:
     topology: str = "p2p"
     cooldown_s: int = 5
     ble_phy: str = "1m"
+    essid: str = ""
 
 
 @dataclass
@@ -59,6 +61,10 @@ class HostInfo:
     wifi_mac: str = ""
     ble_mac: str = ""
     agent_binary: str = "/tmp/cpcbf_agent"
+    transport: str = "ssh"          # "ssh" or "serial_bridge"
+    serial_port: str = ""           # e.g. "/dev/ttyACM0"
+    serial_baud: int = 115200
+    board_type: str = "rpi4"        # "rpi4" or "mkr_wifi_1010"
 
 
 @dataclass

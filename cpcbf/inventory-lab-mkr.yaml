@@ -1,0 +1,21 @@
+# CPCBF Inventory — Arduino MKR WiFi 1010 pair via RPi serial bridges
+# Update bridge RPi IPs and serial ports for your setup.
+
+hosts:
+  mkr_a:
+    hostname: 192.168.8.20       # Bridge RPi A IP
+    username: pi
+    password: raspberry
+    transport: serial_bridge
+    serial_port: /dev/ttyACM0
+    serial_baud: 115200
+    board_type: mkr_wifi_1010
+
+  mkr_b:
+    hostname: 192.168.8.21       # Bridge RPi B IP
+    username: pi
+    password: raspberry
+    transport: serial_bridge
+    serial_port: /dev/ttyACM0
+    serial_baud: 115200
+    board_type: mkr_wifi_1010

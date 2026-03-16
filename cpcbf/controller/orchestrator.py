@@ -70,6 +70,33 @@ class Orchestrator:
                 "ble_phy": {"1m": 1, "2m": 2}.get(test.ble_phy, 1),
             }
 
+        # MKR WiFi 1010: SoftAP topology (sender=AP, receiver=STA)
+        if test.board == "mkr_wifi_1010":
+            local_ip = "192.168.4.1" if is_sender else "192.168.4.2"
+            peer_ip = "192.168.4.2" if is_sender else "192.168.4.1"
+            essid = getattr(test, "essid", None) or "CPCBF_MKR"
+
+            return {
+                "iface_name": "",
+                "peer_addr": peer_ip,
+                "peer_mac": "",
+                "port": test.port,
+                "channel": test.channel,
+                "essid": essid,
+                "local_ip": local_ip,
+                "netmask": "255.255.255.0",
+                "role": role,
+                "topology": "softap",
+                "protocol": "wifi",
+                "mode": test.mode.value,
+                "payload_size": payload_size,
+                "repetitions": test.repetitions,
+                "warmup": test.warmup,
+                "timeout_ms": test.timeout_ms,
+                "inter_packet_us": test.inter_packet_us,
+            }
+
+        # RPi4 WiFi: P2P / ad-hoc topology
         local_ip = "192.168.49.1" if is_sender else "192.168.49.2"
         peer_ip = "192.168.49.2" if is_sender else "192.168.49.1"
 

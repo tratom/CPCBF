@@ -1,0 +1,17 @@
+global:
+  repetitions: 30
+  warmup: 3
+  timeout_ms: 5000
+  inter_packet_us: 500000
+  port: 5201
+  channel: 6
+  topology: softap
+  essid: CPCBF_MKR
+  cooldown_s: 2
+
+tests:
+  - name: wifi_mkr1010_smoke
+    mode: ping_pong
+    protocol: wifi
+    board: mkr_wifi_1010
+    payload_sizes: [20]

@@ -15,14 +15,7 @@
 
 #include <string.h>
 
-/* Platform-agnostic millisecond sleep */
-#if defined(_WIN32)
-  #include <windows.h>
-  #define SLEEP_MS(ms) Sleep(ms)
-#else
-  #include <unistd.h>
-  #define SLEEP_MS(ms) usleep((ms) * 1000u)
-#endif
+/* Use HAL sleep — portable to Arduino, RPi4, etc. */
 
 static const uint8_t SYNC_REQ[2] = {0xC0, 0x01};
 static const uint8_t SYNC_ACK[2] = {0xC0, 0x02};
@@ -69,7 +62,7 @@ int sync_barrier_wait(protocol_adapter_t *adapter, uint32_t timeout_ms)
     /* Send 3 trailing ACKs so the peer also converges */
     for (int i = 0; i < 3; i++) {
         adapter->send(adapter, SYNC_ACK, 2);
-        SLEEP_MS(50);
+        platform_sleep_ms(50);
     }
 
     /* Drain any remaining sync messages from the socket */
