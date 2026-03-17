@@ -24,7 +24,7 @@ On a bridge RPi, test that the Arduino responds:
 
 ```bash
 # Install pyserial if needed
-pip install pyserial
+sudo apt install -y python3-serial
 
 # Quick test via minicom or screen
 screen /dev/ttyACM0 115200
@@ -42,7 +42,7 @@ Edit `cpcbf/inventory-lab-mkr.yaml` with:
 ## 4. Install pyserial on bridge RPis
 
 ```bash
-ssh pi@<rpi_ip> "pip install pyserial"
+ssh pi@<rpi_ip> "sudo apt install -y python3-serial screen"
 ```
 
 ## 5. Run smoke test

@@ -67,11 +67,6 @@ static void send_ok(const char *message)
     send_response("ok", message, nullptr);
 }
 
-static void send_ok_data(const char *message, JsonObject data)
-{
-    send_response("ok", message, &data);
-}
-
 static void send_error(const char *message)
 {
     send_response("error", message, nullptr);

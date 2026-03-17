@@ -23,7 +23,7 @@ tests:
     protocol: wifi
     board: rpi4
     repetitions: 300
-    inter_packet_us: 500000  # 500 ms between samples → 2.5min test (300 packets × 1s pacing + receiver drain)
+    inter_packet_us: 1000000  # 1000 ms between samples → 5min test (300 packets × 1s pacing + receiver drain)
     payload_sizes: [32]
 
 # throughput test with no pacing to get max throughput and observe queueing effects at the receiver
@@ -31,7 +31,7 @@ tests:
     mode: flood
     protocol: wifi
     board: rpi4
-    repetitions: 2000
+    repetitions: 2100000
     inter_packet_us: 0
     payload_sizes: [1458]
 
@@ -39,5 +39,9 @@ tests:
 # However, due to the 14 byte bench packet header, the max payload size for UDP over Wi-Fi
 # is 1500 - 20 IP header - 8 UDP header - 14 bench header = 1458 bytes
 
-# total number of packets: 110 (RSSI) + 310 (RTT) + 2010 (flood) = 2430 packets
-# total exec time ~8 minutes (110 packets × 100ms pacing + 300 packets × 1s pacing + 2010 packets × 0ms pacing + receiver drain)
+# total number of packets: 110 (RSSI) + 310 (RTT) + 2100000 (flood) = 2100420 packets
+# total exec time ~10 minutes (110 packets × 100ms pacing + 300 packets × 1s pacing + 2100000 packets × 0ms pacing + receiver drain)
+
+# 15 s * 3 for cooldown + 37 s * 3 reconnection time = 156 s ~ 2.5 minutes
+
+# total exec time with cooldowns and reconnections: ~13 minutes

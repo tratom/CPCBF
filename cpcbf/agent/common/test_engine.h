@@ -47,7 +47,11 @@ typedef struct {
     uint32_t crc_errors;
     uint32_t warmup_count;
     uint32_t result_count;
-    packet_result_t results[]; /* flexible array */
+#if defined(__cplusplus)
+    packet_result_t results[1]; /* C++ compat — allocated via calloc with extra space */
+#else
+    packet_result_t results[]; /* C99 flexible array */
+#endif
 } test_results_t;
 
 /*
