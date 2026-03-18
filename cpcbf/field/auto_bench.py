@@ -262,7 +262,7 @@ def main():
         rounds = role_cfg.get("rounds", 1)
         plans_subdir = role_cfg.get("plans_subdir", "")
         plans_dir = os.path.join(PLANS_DIR, plans_subdir)
-        plan_files = sorted(glob.glob(os.path.join(plans_dir, "*.yaml")))
+        plan_files = sorted(glob.glob(os.path.join(plans_dir, "**/*.yaml"), recursive=True))
         for r in range(1, rounds + 1):
             for plan_path in plan_files:
                 with open(plan_path) as f:

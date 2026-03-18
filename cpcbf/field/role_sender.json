@@ -4,6 +4,7 @@
     "peer_addr": "192.168.49.2",
     "local_ip": "192.168.49.1",
     "ble_mac_peer": "D8:3A:DD:38:36:B9",
+    "plans_subdir": "rpi",
     "label": "lab-test",
     "rounds": 10
 }
