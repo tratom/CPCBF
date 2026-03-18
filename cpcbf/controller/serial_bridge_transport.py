@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 
 # Path to the relay script (shipped with cpcbf)
 _RELAY_SCRIPT = Path(__file__).resolve().parent.parent / "field" / "serial_relay.py"
-_REMOTE_RELAY = "/tmp/cpcbf_serial_relay.py"
+_REMOTE_RELAY_FMT = "/tmp/cpcbf_relay{slug}.py"
 
 
 class SerialBridgeTransport:
@@ -45,16 +45,21 @@ class SerialBridgeTransport:
 
     def start_agent(self, binary_path: str | None = None) -> None:
         """Upload serial_relay.py and start it on the bridge RPi."""
-        # Upload relay script
-        sftp = self._client.open_sftp()
-        sftp.put(str(_RELAY_SCRIPT), _REMOTE_RELAY)
-        sftp.close()
-        logger.info("Uploaded relay to %s:%s", self.host.hostname, _REMOTE_RELAY)
-
-        # Start relay
         port = self.host.serial_port or "/dev/ttyACM0"
         baud = self.host.serial_baud or 115200
-        cmd = f"python3 {_REMOTE_RELAY} {port} {baud}"
+
+        # Per-port remote path so parallel bridges on the same RPi don't collide
+        port_slug = port.replace("/", "_")  # e.g. "_dev_ttyACM0"
+        remote_relay = _REMOTE_RELAY_FMT.format(slug=port_slug)
+
+        # Upload relay script
+        sftp = self._client.open_sftp()
+        sftp.put(str(_RELAY_SCRIPT), remote_relay)
+        sftp.close()
+        logger.info("Uploaded relay to %s:%s", self.host.hostname, remote_relay)
+
+        # Start relay
+        cmd = f"python3 {remote_relay} {port} {baud}"
         logger.info("Starting serial relay: %s", cmd)
 
         self._stdin, self._stdout, _ = self._client.exec_command(

@@ -5,6 +5,7 @@ import subprocess, json, yaml, sys, os, glob, time, datetime
 
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 AGENT_BIN = "/bin/cpcbf_agent"
+RELAY_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "serial_relay.py")
 PLANS_DIR = os.path.join(REPO_DIR, "plans")
 ROLE_FILE = os.path.join(REPO_DIR, "field", "role.json")
 OUTPUT_DIR = os.path.join(REPO_DIR, "field", "results")
@@ -42,7 +43,33 @@ def send_cmd(proc, cmd_dict, timeout=120):
 MAX_RETRIES = 3
 
 
-def _kill_agent(proc, protocol):
+def _start_proc(role_cfg):
+    """Start agent or serial relay subprocess based on board_type."""
+    board = role_cfg.get("board_type", "rpi4")
+    if board.startswith("mkr_"):
+        port = role_cfg.get("serial_port", "/dev/ttyACM0")
+        baud = str(role_cfg.get("serial_baud", 115200))
+        proc = subprocess.Popen(
+            ["python3", RELAY_SCRIPT, port, baud],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=open("/tmp/cpcbf_relay.log", "a"),
+            text=True,
+        )
+        # Wait for relay to be ready (2s Arduino reset + boot drain)
+        time.sleep(3)
+        return proc
+    else:
+        return subprocess.Popen(
+            ["sudo", AGENT_BIN],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=open("/tmp/cpcbf_agent.log", "a"),
+            text=True,
+        )
+
+
+def _kill_agent(proc, protocol, board_type="rpi4"):
     """Stop agent cleanly and restart NetworkManager if needed."""
     try:
         send_cmd(proc, {"command": "STOP"}, timeout=10)
@@ -50,7 +77,7 @@ def _kill_agent(proc, protocol):
         pass
     proc.terminate()
     proc.wait()
-    if protocol != "ble":
+    if protocol != "ble" and not board_type.startswith("mkr_"):
         subprocess.run(
             ["systemctl", "start", "NetworkManager"],
             capture_output=True, timeout=10,
@@ -88,6 +115,20 @@ def _build_params(role_cfg, plan_global, test, payload_size):
             "netmask": "",
             "protocol": "ble",
         })
+    elif protocol == "wifi" and role_cfg.get("board_type", "rpi4").startswith("mkr_"):
+        # MKR WiFi: SoftAP topology, fixed IPs
+        is_sender = (role_str == "sender")
+        common.update({
+            "iface_name": "",
+            "peer_addr": "192.168.4.2" if is_sender else "192.168.4.1",
+            "peer_mac": "",
+            "port": g.get("port", test.get("port", 5201)),
+            "channel": g.get("channel", test.get("channel", 1)),
+            "essid": g.get("essid", test.get("essid", "CPCBF_MKR")),
+            "local_ip": "192.168.4.1" if is_sender else "192.168.4.2",
+            "netmask": "255.255.255.0",
+            "topology": "softap",
+        })
     else:
         common.update({
             "iface_name": "wlan0",
@@ -116,13 +157,7 @@ def run_test_plan(role_cfg, plan, label_prefix, round_num=1):
             # same test with a fresh agent so they stay aligned.
             success = False
             for attempt in range(1, MAX_RETRIES + 1):
-                proc = subprocess.Popen(
-                    ["sudo", AGENT_BIN],
-                    stdin=subprocess.PIPE,
-                    stdout=subprocess.PIPE,
-                    stderr=open("/tmp/cpcbf_agent.log", "a"),
-                    text=True,
-                )
+                proc = _start_proc(role_cfg)
                 try:
                     # CONFIGURE
                     send_cmd(proc, {"command": "CONFIGURE", "params": params})
@@ -145,8 +180,12 @@ def run_test_plan(role_cfg, plan, label_prefix, round_num=1):
                               f"SYNC failed: {sync_resp.get('message', '?')}")
                         continue
 
-                    # START (blocking)
-                    send_cmd(proc, {"command": "START"}, timeout=300)
+                    # START (blocking) — dynamic timeout based on test params
+                    max_test_s = (params["repetitions"] + params["warmup"]) * (params["timeout_ms"] / 1000)
+                    if params["inter_packet_us"] > 0:
+                        max_test_s += params["repetitions"] * (params["inter_packet_us"] / 1_000_000)
+                    start_timeout = max(300, int(max_test_s) + 60)
+                    send_cmd(proc, {"command": "START"}, timeout=start_timeout)
 
                     # GET_RESULTS
                     resp = send_cmd(proc, {"command": "GET_RESULTS"})
@@ -168,7 +207,7 @@ def run_test_plan(role_cfg, plan, label_prefix, round_num=1):
                         "test_name": test_name,
                         "mode": test["mode"],
                         "protocol": protocol,
-                        "board": test.get("board", "rpi4"),
+                        "board": test.get("board", role_cfg.get("board_type", "rpi4")),
                         "payload_size": payload_size,
                         "repetitions": params["repetitions"],
                         "warmup": params["warmup"],
@@ -189,7 +228,8 @@ def run_test_plan(role_cfg, plan, label_prefix, round_num=1):
                           f"exception: {e}")
 
                 finally:
-                    _kill_agent(proc, protocol)
+                    _kill_agent(proc, protocol,
+                               board_type=role_cfg.get("board_type", "rpi4"))
 
             if not success:
                 print(f"FAILED after {MAX_RETRIES} attempts: "
@@ -211,6 +251,7 @@ def main():
     led_heartbeat()
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+    role_cfg = {}
     try:
         with open(ROLE_FILE) as f:
             role_cfg = json.load(f)
@@ -219,14 +260,17 @@ def main():
 
         # Run all YAML plans in the plans directory, repeated for N rounds
         rounds = role_cfg.get("rounds", 1)
-        plan_files = sorted(glob.glob(os.path.join(PLANS_DIR, "*.yaml")))
+        plans_subdir = role_cfg.get("plans_subdir", "")
+        plans_dir = os.path.join(PLANS_DIR, plans_subdir)
+        plan_files = sorted(glob.glob(os.path.join(plans_dir, "*.yaml")))
         for r in range(1, rounds + 1):
             for plan_path in plan_files:
                 with open(plan_path) as f:
                     plan = yaml.safe_load(f)
                 run_test_plan(role_cfg, plan, label, round_num=r)
     finally:
-        restore_network()
+        if not role_cfg.get("board_type", "rpi4").startswith("mkr_"):
+            restore_network()
 
     led_off()
 

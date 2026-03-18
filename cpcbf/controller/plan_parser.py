@@ -40,7 +40,7 @@ def _validate_plan(plan: TestPlan) -> None:
             )
 
         # Payload sizes must be in valid range for the target board
-        max_payload = 512 if test.board == "mkr_wifi_1010" else 8192
+        max_payload = 1024 if test.board == "mkr_wifi_1010" else 8192
         for size in test.payload_sizes:
             if size < 0 or size > max_payload:
                 raise ValueError(

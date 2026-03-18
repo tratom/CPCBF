@@ -110,6 +110,9 @@ static void handle_configure(JsonObject params)
     g_test_cfg.timeout_ms = params["timeout_ms"] | (uint32_t)5000;
     g_test_cfg.inter_packet_us = params["inter_packet_us"] | (uint32_t)0;
 
+    /* Flood mode: aggregate-only to handle millions of packets without SRAM */
+    g_test_cfg.aggregate_only = (g_test_cfg.mode == TEST_MODE_FLOOD) ? 1 : 0;
+
     g_configured = 1;
     send_ok("configured");
 }
@@ -230,6 +233,9 @@ static void handle_get_results()
     Serial.print("\"packets_received\":"); Serial.print(g_results->packets_received); Serial.print(",");
     Serial.print("\"packets_lost\":"); Serial.print(g_results->packets_lost); Serial.print(",");
     Serial.print("\"crc_errors\":"); Serial.print(g_results->crc_errors); Serial.print(",");
+    Serial.print("\"start_us\":"); Serial.print(g_results->start_us); Serial.print(",");
+    Serial.print("\"end_us\":"); Serial.print(g_results->end_us); Serial.print(",");
+    Serial.print("\"aggregate_only\":"); Serial.print(g_results->aggregate_only); Serial.print(",");
     Serial.print("\"packets\":[");
 
     for (uint32_t i = 0; i < g_results->result_count; i++) {

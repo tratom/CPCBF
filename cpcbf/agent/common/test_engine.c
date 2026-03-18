@@ -96,6 +96,9 @@ static void run_ping_pong_sender(protocol_adapter_t *adapter,
         res->packets_received++;
 
         res->result_count++;
+
+        if (cfg->inter_packet_us > 0)
+            platform_sleep_us(cfg->inter_packet_us);
     }
 }
 
@@ -165,6 +168,7 @@ static void run_flood_sender(protocol_adapter_t *adapter,
     uint32_t total = cfg->warmup + cfg->repetitions;
     uint8_t tx_buf[BENCH_MAX_PAYLOAD + BENCH_OVERHEAD];
     bench_packet_t pkt;
+    int agg = cfg->aggregate_only;
 
     memset(&pkt, 0, sizeof(pkt));
     pkt.msg_type = MSG_FLOOD;
@@ -184,15 +188,21 @@ static void run_flood_sender(protocol_adapter_t *adapter,
         int rc = adapter->send(adapter, tx_buf, (size_t)enc_len);
         res->packets_sent++;
 
-        packet_result_t *pr = &res->results[res->result_count];
-        pr->seq = pkt.seq_num;
-        pr->tx_us = tx_us;
-        pr->is_warmup = (i < cfg->warmup) ? 1 : 0;
-        pr->lost = (rc != ADAPTER_OK) ? 1 : 0;
-        if (pr->lost)
+        if (i == 0)
+            res->start_us = tx_us;
+        res->end_us = tx_us;
+
+        if (rc != ADAPTER_OK)
             res->packets_lost++;
 
-        res->result_count++;
+        if (!agg) {
+            packet_result_t *pr = &res->results[res->result_count];
+            pr->seq = pkt.seq_num;
+            pr->tx_us = tx_us;
+            pr->is_warmup = (i < cfg->warmup) ? 1 : 0;
+            pr->lost = (rc != ADAPTER_OK) ? 1 : 0;
+            res->result_count++;
+        }
 
         if (cfg->inter_packet_us > 0)
             platform_sleep_us(cfg->inter_packet_us);
@@ -211,6 +221,7 @@ static void run_flood_receiver(protocol_adapter_t *adapter,
     uint8_t rx_buf[BENCH_MAX_PAYLOAD + BENCH_OVERHEAD];
     uint32_t consecutive_timeouts = 0;
     uint32_t highest_seq = 0;
+    int agg = cfg->aggregate_only;
 
     /*
      * Drain approach: receive packets until we get several consecutive
@@ -239,27 +250,30 @@ static void run_flood_receiver(protocol_adapter_t *adapter,
         bench_packet_t pkt;
         int dec_rc = bench_packet_decode(rx_buf, rx_len, &pkt);
 
-        packet_result_t *pr = &res->results[res->result_count];
-        pr->is_warmup = (pkt.seq_num < cfg->warmup) ? 1 : 0;
-
         if (dec_rc == -2) {
-            pr->crc_ok = 0;
             res->crc_errors++;
-            pr->seq = pkt.seq_num;
-        } else if (dec_rc == 0) {
-            pr->crc_ok = 1;
-            pr->seq = pkt.seq_num;
-        } else {
+        } else if (dec_rc != 0) {
             continue;  /* completely garbled — skip */
         }
 
-        pr->rx_us = rx_us;
+        /* Timing bookkeeping */
+        if (res->packets_received == 0)
+            res->start_us = rx_us;
+        res->end_us = rx_us;
+
         res->packets_received++;
 
         if (pkt.seq_num > highest_seq)
             highest_seq = pkt.seq_num;
 
-        res->result_count++;
+        if (!agg) {
+            packet_result_t *pr = &res->results[res->result_count];
+            pr->is_warmup = (pkt.seq_num < cfg->warmup) ? 1 : 0;
+            pr->seq = pkt.seq_num;
+            pr->rx_us = rx_us;
+            pr->crc_ok = (dec_rc == 0) ? 1 : 0;
+            res->result_count++;
+        }
     }
 
     /* Count lost packets: total sent (highest_seq+1) minus received */
@@ -318,11 +332,13 @@ test_results_t *test_engine_run(protocol_adapter_t *adapter,
         return NULL;
 
     uint32_t total = cfg->warmup + cfg->repetitions;
-    test_results_t *res = test_results_alloc(total);
+    uint32_t alloc_count = cfg->aggregate_only ? 0 : total;
+    test_results_t *res = test_results_alloc(alloc_count);
     if (!res)
         return NULL;
 
     res->warmup_count = cfg->warmup;
+    res->aggregate_only = cfg->aggregate_only;
 
     switch (cfg->mode) {
     case TEST_MODE_PING_PONG:
@@ -374,6 +390,9 @@ char *test_results_to_json(const test_results_t *results,
         "  \"packets_received\": %u,\n"
         "  \"packets_lost\": %u,\n"
         "  \"crc_errors\": %u,\n"
+        "  \"start_us\": %u,\n"
+        "  \"end_us\": %u,\n"
+        "  \"aggregate_only\": %u,\n"
         "  \"packets\": [\n",
         cfg->mode == TEST_MODE_PING_PONG ? "ping_pong" :
         cfg->mode == TEST_MODE_FLOOD     ? "flood"     : "rssi",
@@ -384,7 +403,10 @@ char *test_results_to_json(const test_results_t *results,
         results->packets_sent,
         results->packets_received,
         results->packets_lost,
-        results->crc_errors);
+        results->crc_errors,
+        results->start_us,
+        results->end_us,
+        results->aggregate_only);
 
     for (uint32_t i = 0; i < results->result_count; i++) {
         const packet_result_t *p = &results->results[i];

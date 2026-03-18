@@ -1,0 +1,43 @@
+global:
+  warmup: 10
+  timeout_ms: 500
+  port: 5201
+  channel: 1
+  topology: softap
+  essid: CPCBF_MKR
+  cooldown_s: 15
+
+tests:
+
+# RSSI test with 100ms pacing to get stable RSSI readings without queueing effects
+  - name: wifi_mkr1010_rssi
+    mode: rssi
+    protocol: wifi
+    board: mkr_wifi_1010
+    repetitions: 100
+    inter_packet_us: 100000   # 100ms between samples → 10s test
+    payload_sizes: [0]        # not used for RSSI, but required by schema
+
+# latency test with 1s pacing to avoid queueing and get clean RTT measurements
+  - name: wifi_mkr1010_rtt
+    mode: ping_pong
+    protocol: wifi
+    board: mkr_wifi_1010
+    repetitions: 300
+    inter_packet_us: 1000000  # 1000 ms between samples → 5min test (300 packets × 1s pacing + receiver drain)
+    payload_sizes: [32]
+
+# throughput test with no pacing to get max throughput (aggregate-only on MKR)
+# 1024B payload = max safe size for WiFiNINA SPI bridge (vs 1458B on RPi4)
+# aggregate_only is set automatically for flood mode on Arduino firmware
+  - name: wifi_mkr1010_flood
+    mode: flood
+    protocol: wifi
+    board: mkr_wifi_1010
+    repetitions: 2100000
+    inter_packet_us: 0
+    payload_sizes: [1024]
+
+# total number of packets: 110 (RSSI) + 310 (RTT) + 2100000 (flood) = 2100420 packets
+# total exec time ~10 minutes (same as RPi4 plan)
+# 15 s * 3 for cooldown + reconnection time = ~1 minute

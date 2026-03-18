@@ -4,7 +4,7 @@ global:
   timeout_ms: 5000
   inter_packet_us: 500000
   port: 5201
-  channel: 6
+  channel: 1
   topology: softap
   essid: CPCBF_MKR
   cooldown_s: 2
@@ -14,4 +14,4 @@ tests:
     mode: ping_pong
     protocol: wifi
     board: mkr_wifi_1010
-    payload_sizes: [20]
+    payload_sizes: [32]

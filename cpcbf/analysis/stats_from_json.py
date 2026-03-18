@@ -53,8 +53,47 @@ def compute_stats_from_record(rec: dict) -> RunStats:
 
     # Source selection: ping_pong → sender (has RTT), flood → receiver
     source = "sender" if mode == "ping_pong" else "receiver"
-    packets = rec.get(source, {}).get("packets", [])
+    side_data = rec.get(source, {})
+    packets = side_data.get("packets", [])
+    is_aggregate = bool(side_data.get("aggregate_only"))
 
+    # Aggregate-only flood (constrained devices — no per-packet data)
+    if is_aggregate and mode == "flood":
+        sender_data = rec.get("sender", {})
+        receiver_data = rec.get("receiver", {})
+        packets_sent = sender_data.get("packets_sent", 0)
+        packets_rcv = receiver_data.get("packets_received", 0)
+        crc_errs = receiver_data.get("crc_errors", 0)
+        start_us = receiver_data.get("start_us", 0)
+        end_us = receiver_data.get("end_us", 0)
+
+        packet_loss_pct = ((packets_sent - packets_rcv) / packets_sent * 100) if packets_sent > 0 else 0.0
+        crc_error_pct = (crc_errs / packets_rcv * 100) if packets_rcv > 0 else 0.0
+
+        throughput = None
+        duration_us = end_us - start_us
+        if duration_us > 0 and packets_rcv > 0:
+            overhead = 14 if protocol == "ble" else 42
+            wire_bytes = payload_size + overhead
+            total_bits = packets_rcv * wire_bytes * 8
+            throughput = total_bits / (duration_us / 1e6)
+
+        return RunStats(
+            test_name=test_name,
+            mode=mode,
+            protocol=protocol,
+            payload_size=payload_size,
+            packets_measured=packets_rcv,
+            rtt_mean_us=None, rtt_median_us=None, rtt_std_us=None,
+            rtt_p95_us=None, rtt_p99_us=None,
+            rtt_ci95_low=None, rtt_ci95_high=None,
+            packet_loss_pct=packet_loss_pct,
+            crc_error_pct=crc_error_pct,
+            jitter_us=None, rssi_mean=None, rssi_std=None,
+            throughput_bps=throughput,
+        )
+
+    # Per-packet analysis path (original)
     # Filter out warmup packets
     measured = [p for p in packets if not p.get("warmup")]
     total = len(measured)
@@ -258,6 +297,35 @@ def print_results(all_stats: list[RunStats]) -> None:
     print()
 
 
+def _print_metadata_header(path: Path) -> None:
+    """Print experiment metadata header if experiment.json exists."""
+    search_dir = path if path.is_dir() else path.parent
+    exp_file = search_dir / "experiment.json"
+    if not exp_file.exists():
+        return
+    try:
+        with open(exp_file) as f:
+            meta = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return
+
+    print()
+    print(f"Experiment: {meta.get('scenario_id', 'N/A')}")
+    if meta.get("location"):
+        print(f"Location:   {meta['location']}")
+    if meta.get("test_date"):
+        print(f"Date:       {meta['test_date']}")
+
+    cfg = meta.get("test_configuration", {})
+    parts = []
+    if cfg.get("technology"):
+        parts.append(cfg["technology"])
+    if cfg.get("distance_meters"):
+        parts.append(f"Distance: {cfg['distance_meters']}m")
+    if parts:
+        print(f"Config:     {' | '.join(parts)}")
+
+
 def main():
     if len(sys.argv) < 2:
         print(f"Usage: {sys.argv[0]} <jsonl-file-or-directory>")
@@ -267,6 +335,8 @@ def main():
     if not path.exists():
         print(f"Error: {path} not found")
         sys.exit(1)
+
+    _print_metadata_header(path)
 
     records = collect_records(path)
     if not records:

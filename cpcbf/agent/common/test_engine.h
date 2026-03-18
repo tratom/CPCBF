@@ -25,6 +25,7 @@ typedef struct {
     uint32_t warmup;          /* warmup packets (excluded from stats) */
     uint32_t timeout_ms;      /* per-packet timeout */
     uint32_t inter_packet_us; /* delay between sends (flood mode) */
+    uint8_t  aggregate_only;  /* 1 = skip per-packet storage (flood on constrained devices) */
 } test_config_t;
 
 /* Per-packet result */
@@ -47,6 +48,9 @@ typedef struct {
     uint32_t crc_errors;
     uint32_t warmup_count;
     uint32_t result_count;
+    uint32_t start_us;        /* timestamp of first packet */
+    uint32_t end_us;          /* timestamp of last packet */
+    uint8_t  aggregate_only;  /* 1 = no per-packet results stored */
 #if defined(__cplusplus)
     packet_result_t results[1]; /* C++ compat — allocated via calloc with extra space */
 #else

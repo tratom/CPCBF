@@ -1,0 +1,41 @@
+# CPCBF Field Inventory — MKR boards via RPi serial bridges
+# Supports parallel WiFi + LoRa on the same bridge RPis (different USB ports).
+# Update IPs, credentials, and serial ports for your field setup.
+
+hosts:
+  mkr_wifi_a:
+    hostname: 192.168.8.20       # Bridge RPi A IP
+    username: pi
+    password: raspberry
+    transport: serial_bridge
+    serial_port: /dev/ttyACM0
+    serial_baud: 115200
+    board_type: mkr_wifi_1010
+
+  mkr_wifi_b:
+    hostname: 192.168.8.21       # Bridge RPi B IP
+    username: pi
+    password: raspberry
+    transport: serial_bridge
+    serial_port: /dev/ttyACM0
+    serial_baud: 115200
+    board_type: mkr_wifi_1010
+
+  # LoRa boards on second USB port of the same RPis
+  # Uncomment when MKR WAN 1310 support is implemented
+  # mkr_lora_a:
+  #   hostname: 192.168.8.20     # same RPi as mkr_wifi_a
+  #   username: pi
+  #   password: raspberry
+  #   transport: serial_bridge
+  #   serial_port: /dev/ttyACM1
+  #   serial_baud: 115200
+  #   board_type: mkr_wan_1310
+  # mkr_lora_b:
+  #   hostname: 192.168.8.21     # same RPi as mkr_wifi_b
+  #   username: pi
+  #   password: raspberry
+  #   transport: serial_bridge
+  #   serial_port: /dev/ttyACM1
+  #   serial_baud: 115200
+  #   board_type: mkr_wan_1310

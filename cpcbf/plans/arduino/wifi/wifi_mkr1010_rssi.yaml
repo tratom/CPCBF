@@ -11,7 +11,7 @@ global:
 
 tests:
   - name: wifi_mkr1010_rtt
-    mode: ping_pong
+    mode: rssi
     protocol: wifi
     board: mkr_wifi_1010
-    payload_sizes: [32]
+    payload_sizes: [0]

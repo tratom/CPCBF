@@ -5,11 +5,12 @@
 #ifndef CPCBF_ARDUINO_CONFIG_H
 #define CPCBF_ARDUINO_CONFIG_H
 
-/* Max payload already set via build flag (-DBENCH_MAX_PAYLOAD=512) */
+/* Max payload set via build flag (-DBENCH_MAX_PAYLOAD=1024) */
 
-/* Maximum stored test results — ~2200 bytes with 20 bytes per entry */
+/* Maximum stored test results — ~12 KB with 24 bytes per entry.
+ * Flood mode uses aggregate_only=1, so this only matters for RTT/RSSI. */
 #ifndef MAX_RESULTS
-#define MAX_RESULTS 110
+#define MAX_RESULTS 500
 #endif
 
 /* Serial baud rate */

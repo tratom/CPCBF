@@ -1,0 +1,9 @@
+{
+    "role": "sender",
+    "board_type": "mkr_wifi_1010",
+    "serial_port": "/dev/ttyACM0",
+    "serial_baud": 115200,
+    "plans_subdir": "arduino/wifi",
+    "label": "field-mkr-wifi",
+    "rounds": 10
+}

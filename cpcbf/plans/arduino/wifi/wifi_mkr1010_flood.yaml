@@ -1,10 +1,10 @@
 global:
-  repetitions: 100
-  warmup: 5
-  timeout_ms: 5000
+  repetitions: 2000
+  warmup: 10
+  timeout_ms: 500
   inter_packet_us: 0
   port: 5201
-  channel: 6
+  channel: 1
   topology: softap
   essid: CPCBF_MKR
   cooldown_s: 5
@@ -14,4 +14,4 @@ tests:
     mode: flood
     protocol: wifi
     board: mkr_wifi_1010
-    payload_sizes: [20, 100, 244]
+    payload_sizes: [1024]

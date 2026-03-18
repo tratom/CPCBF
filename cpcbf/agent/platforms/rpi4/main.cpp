@@ -278,6 +278,9 @@ static void handle_get_results()
     data["packets_received"] = g_results->packets_received;
     data["packets_lost"] = g_results->packets_lost;
     data["crc_errors"] = g_results->crc_errors;
+    data["start_us"] = g_results->start_us;
+    data["end_us"] = g_results->end_us;
+    data["aggregate_only"] = g_results->aggregate_only;
 
     JsonArray packets = data["packets"].to<JsonArray>();
     for (uint32_t i = 0; i < g_results->result_count; i++) {

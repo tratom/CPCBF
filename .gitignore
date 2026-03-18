@@ -20,6 +20,12 @@ results/
 cpcbf/field/role.json
 cpcbf/field/results/
 
+# Experiment photos (binary images)
+**/photos/
+
 # Editor
 *.swp
 *~
+
+# Logs
+*.log

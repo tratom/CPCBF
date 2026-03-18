@@ -10,7 +10,7 @@ ExecStopPost=/bin/systemctl start NetworkManager
 StandardOutput=journal
 StandardError=journal
 RemainAfterExit=yes
-TimeoutStartSec=3600
+TimeoutStartSec=infinity
 
 [Install]
 WantedBy=multi-user.target

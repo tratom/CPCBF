@@ -34,15 +34,67 @@ class RunStats:
     throughput_bps: float | None
 
 
+def _compute_flood_throughput(protocol: str, payload_size: int,
+                              packets_received: int, duration_us: float) -> float | None:
+    """Compute throughput in bits/sec from aggregate flood data."""
+    if duration_us <= 0 or packets_received <= 0:
+        return None
+    # Wire bytes per packet depends on protocol:
+    # WiFi (UDP): payload + 14B bench hdr/CRC + 8B UDP + 20B IP = payload + 42
+    # BLE (L2CAP CoC): payload + 14B bench hdr/CRC (no IP/UDP layer)
+    overhead = 14 if protocol == "ble" else 42
+    wire_bytes = payload_size + overhead
+    total_bits = packets_received * wire_bytes * 8
+    return total_bits / (duration_us / 1e6)
+
+
 def compute_run_stats(conn: sqlite3.Connection, run_id: int) -> RunStats:
     """Compute summary statistics for a single test run."""
     # Get run metadata
     meta = conn.execute(
-        "SELECT test_name, mode, payload_size, repetitions, protocol FROM test_runs WHERE run_id = ?",
+        """SELECT test_name, mode, payload_size, repetitions, protocol,
+                  aggregate_only, sender_packets_sent, receiver_packets_rcv,
+                  receiver_crc_errors, receiver_start_us, receiver_end_us
+           FROM test_runs WHERE run_id = ?""",
         (run_id,),
     ).fetchone()
-    test_name, mode, payload_size, repetitions, protocol = meta
+    (test_name, mode, payload_size, repetitions, protocol,
+     aggregate_only, agg_sender_sent, agg_receiver_rcv,
+     agg_crc_errors, rx_start_us, rx_end_us) = meta
 
+    # Aggregate-only runs (e.g. flood on constrained devices) — no per-packet data
+    if aggregate_only and mode == "flood":
+        packets_sent = agg_sender_sent or 0
+        packets_rcv = agg_receiver_rcv or 0
+        crc_errs = agg_crc_errors or 0
+        packet_loss_pct = ((packets_sent - packets_rcv) / packets_sent * 100) if packets_sent > 0 else 0.0
+        crc_error_pct = (crc_errs / packets_rcv * 100) if packets_rcv > 0 else 0.0
+
+        duration_us = (rx_end_us - rx_start_us) if (rx_start_us and rx_end_us) else 0
+        throughput = _compute_flood_throughput(protocol, payload_size, packets_rcv, duration_us)
+
+        return RunStats(
+            run_id=run_id,
+            test_name=test_name,
+            mode=mode,
+            payload_size=payload_size,
+            packets_measured=packets_rcv,
+            rtt_mean_us=None,
+            rtt_median_us=None,
+            rtt_std_us=None,
+            rtt_p95_us=None,
+            rtt_p99_us=None,
+            rtt_ci95_low=None,
+            rtt_ci95_high=None,
+            packet_loss_pct=packet_loss_pct,
+            crc_error_pct=crc_error_pct,
+            jitter_us=None,
+            rssi_mean=None,
+            rssi_std=None,
+            throughput_bps=throughput,
+        )
+
+    # Per-packet analysis path (original)
     # For ping_pong, use sender packets (has RTT). For flood, use receiver packets.
     source = "sender" if mode == "ping_pong" else "receiver"
     df = pd.read_sql_query(
@@ -108,14 +160,7 @@ def compute_run_stats(conn: sqlite3.Connection, run_id: int) -> RunStats:
         if len(rx_df) > 1:
             rx_times = rx_df["rx_us"].values.astype(float)
             duration_us = rx_times[-1] - rx_times[0]
-            if duration_us > 0:
-                # Wire bytes per packet depends on protocol:
-                # WiFi (UDP): payload + 14B bench hdr/CRC + 8B UDP + 20B IP = payload + 42
-                # BLE (L2CAP CoC): payload + 14B bench hdr/CRC (no IP/UDP layer)
-                overhead = 14 if protocol == "ble" else 42
-                wire_bytes = payload_size + overhead
-                total_bits = len(rx_df) * wire_bytes * 8
-                throughput = total_bits / (duration_us / 1e6)  # bits per second
+            throughput = _compute_flood_throughput(protocol, payload_size, len(rx_df), duration_us)
 
     return RunStats(
         run_id=run_id,
