@@ -1,21 +1,13 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
   "title": "Experiment Metadata",
-  "description": "Metadata for a CPCBF experiment session",
+  "description": "Metadata for a CPCBF experiment session (non-derivable fields only)",
   "type": "object",
   "required": ["scenario_id"],
   "properties": {
     "scenario_id": {
       "type": "string",
       "description": "Unique identifier for the scenario (typically directory name)"
-    },
-    "test_procedure_description": {
-      "type": "string",
-      "description": "Description of the test procedure"
-    },
-    "environmental_description": {
-      "type": "string",
-      "description": "Description of the physical environment"
     },
     "location": {
       "type": "string",
@@ -26,30 +18,32 @@
       "format": "date",
       "description": "Date the test was performed (YYYY-MM-DD)"
     },
-    "test_configuration": {
+    "distance_meters": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Distance between sender and receiver in meters"
+    },
+    "test_procedure_description": {
+      "type": "string",
+      "description": "Description of the test procedure"
+    },
+    "environmental_description": {
+      "type": "string",
+      "description": "Description of the physical environment"
+    },
+    "dynamic_interference": {
       "type": "object",
       "properties": {
-        "technology": {
-          "type": "string",
-          "enum": ["wifi", "ble", "lora", "zigbee", "ghn", ""]
-        },
-        "distance_meters": {
-          "type": "number",
-          "minimum": 0
-        },
-        "samples_per_scenario": {
+        "pedestrians_observed": {
           "type": "integer",
-          "minimum": 1
-        },
-        "iteration_duration_minutes": {
-          "type": "number",
           "minimum": 0
         },
-        "measured_metrics": {
-          "type": "array",
-          "items": {
-            "type": "string"
-          }
+        "vehicles_observed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "notes": {
+          "type": "string"
         }
       },
       "additionalProperties": true
@@ -69,11 +63,21 @@
           "hardware": {
             "type": "string"
           },
-          "ip_address": {
-            "type": "string"
+          "local_ip": {
+            "type": "string",
+            "description": "Device's own IP address"
           },
-          "mac_address": {
-            "type": "string"
+          "peer_addr": {
+            "type": "string",
+            "description": "Peer device IP address"
+          },
+          "peer_mac": {
+            "type": "string",
+            "description": "Peer device WiFi MAC address"
+          },
+          "ble_mac_peer": {
+            "type": "string",
+            "description": "Peer device BLE MAC address"
           },
           "notes": {
             "type": "string"
@@ -81,23 +85,6 @@
         },
         "additionalProperties": true
       }
-    },
-    "dynamic_interference": {
-      "type": "object",
-      "properties": {
-        "pedestrians_observed": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "vehicles_observed": {
-          "type": "integer",
-          "minimum": 0
-        },
-        "notes": {
-          "type": "string"
-        }
-      },
-      "additionalProperties": true
     },
     "media_files": {
       "type": "array",

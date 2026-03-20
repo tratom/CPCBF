@@ -7,18 +7,19 @@ import pandas as pd
 from .stats import compute_all_stats
 
 
-def comparison_table(db_path: str) -> pd.DataFrame:
+def comparison_table(experiment_id: int | None = None, protocol: str | None = None) -> pd.DataFrame:
     """Build a comparison DataFrame with key metrics across all runs.
 
-    Columns: test_name, mode, payload_size, rtt_median_us, rtt_p95_us,
+    Columns: protocol, test_name, mode, payload_size, rtt_median_us, rtt_p95_us,
              packet_loss_pct, jitter_us, throughput_bps, rssi_mean
     """
-    stats_df = compute_all_stats(db_path)
+    stats_df = compute_all_stats(experiment_id=experiment_id, protocol=protocol)
 
     if stats_df.empty:
         return stats_df
 
     columns = [
+        "protocol",
         "test_name",
         "mode",
         "payload_size",
@@ -35,5 +36,5 @@ def comparison_table(db_path: str) -> pd.DataFrame:
     ]
     available = [c for c in columns if c in stats_df.columns]
     return stats_df[available].sort_values(
-        ["test_name", "payload_size"]
+        ["protocol", "test_name", "payload_size"]
     ).reset_index(drop=True)

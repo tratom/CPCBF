@@ -1,13 +1,14 @@
-"""Statistical analysis of benchmark results."""
+"""Statistical analysis of benchmark results from PostgreSQL."""
 
 from __future__ import annotations
 
-import sqlite3
 from dataclasses import dataclass
 
 import numpy as np
 import pandas as pd
 from scipy import stats
+
+from .db import get_connection
 
 
 @dataclass
@@ -17,6 +18,7 @@ class RunStats:
     run_id: int
     test_name: str
     mode: str
+    protocol: str
     payload_size: int
     packets_measured: int
     rtt_mean_us: float | None
@@ -39,36 +41,39 @@ def _compute_flood_throughput(protocol: str, payload_size: int,
     """Compute throughput in bits/sec from aggregate flood data."""
     if duration_us <= 0 or packets_received <= 0:
         return None
-    # Wire bytes per packet depends on protocol:
-    # WiFi (UDP): payload + 14B bench hdr/CRC + 8B UDP + 20B IP = payload + 42
-    # BLE (L2CAP CoC): payload + 14B bench hdr/CRC (no IP/UDP layer)
     overhead = 14 if protocol == "ble" else 42
     wire_bytes = payload_size + overhead
     total_bits = packets_received * wire_bytes * 8
     return total_bits / (duration_us / 1e6)
 
 
-def compute_run_stats(conn: sqlite3.Connection, run_id: int) -> RunStats:
+def compute_run_stats(conn, run_id: int) -> RunStats:
     """Compute summary statistics for a single test run."""
-    # Get run metadata
-    meta = conn.execute(
-        """SELECT test_name, mode, payload_size, repetitions, protocol,
-                  aggregate_only, sender_packets_sent, receiver_packets_rcv,
-                  receiver_crc_errors, receiver_start_us, receiver_end_us
-           FROM test_runs WHERE run_id = ?""",
+    cur = conn.cursor()
+    cur.execute(
+        """SELECT r.test_name, r.mode, r.payload_size, r.repetitions, r.protocol,
+                  f.sender_measured_count, f.sender_lost, f.sender_crc_errors,
+                  f.receiver_measured_count, f.receiver_lost, f.receiver_crc_errors,
+                  f.receiver_start_us, f.receiver_end_us
+           FROM test_runs r
+           LEFT JOIN flood_runs f ON r.run_id = f.run_id
+           WHERE r.run_id = %s""",
         (run_id,),
-    ).fetchone()
+    )
+    meta = cur.fetchone()
     (test_name, mode, payload_size, repetitions, protocol,
-     aggregate_only, agg_sender_sent, agg_receiver_rcv,
-     agg_crc_errors, rx_start_us, rx_end_us) = meta
+     sender_measured, sender_lost, sender_crc_errors,
+     receiver_measured, receiver_lost, receiver_crc_errors,
+     rx_start_us, rx_end_us) = meta
+    cur.close()
 
-    # Aggregate-only runs (e.g. flood on constrained devices) — no per-packet data
-    if aggregate_only and mode == "flood":
-        packets_sent = agg_sender_sent or 0
-        packets_rcv = agg_receiver_rcv or 0
-        crc_errs = agg_crc_errors or 0
+    # Flood mode: always aggregate, no per-packet data
+    if mode == "flood":
+        packets_sent = sender_measured or 0
+        packets_rcv = receiver_measured or 0
+        r_crc_errs = receiver_crc_errors or 0
         packet_loss_pct = ((packets_sent - packets_rcv) / packets_sent * 100) if packets_sent > 0 else 0.0
-        crc_error_pct = (crc_errs / packets_rcv * 100) if packets_rcv > 0 else 0.0
+        crc_error_pct = (r_crc_errs / packets_rcv * 100) if packets_rcv > 0 else 0.0
 
         duration_us = (rx_end_us - rx_start_us) if (rx_start_us and rx_end_us) else 0
         throughput = _compute_flood_throughput(protocol, payload_size, packets_rcv, duration_us)
@@ -77,44 +82,38 @@ def compute_run_stats(conn: sqlite3.Connection, run_id: int) -> RunStats:
             run_id=run_id,
             test_name=test_name,
             mode=mode,
+            protocol=protocol,
             payload_size=payload_size,
             packets_measured=packets_rcv,
-            rtt_mean_us=None,
-            rtt_median_us=None,
-            rtt_std_us=None,
-            rtt_p95_us=None,
-            rtt_p99_us=None,
-            rtt_ci95_low=None,
-            rtt_ci95_high=None,
+            rtt_mean_us=None, rtt_median_us=None, rtt_std_us=None,
+            rtt_p95_us=None, rtt_p99_us=None,
+            rtt_ci95_low=None, rtt_ci95_high=None,
             packet_loss_pct=packet_loss_pct,
             crc_error_pct=crc_error_pct,
-            jitter_us=None,
-            rssi_mean=None,
-            rssi_std=None,
+            jitter_us=None, rssi_mean=None, rssi_std=None,
             throughput_bps=throughput,
         )
 
-    # Per-packet analysis path (original)
-    # For ping_pong, use sender packets (has RTT). For flood, use receiver packets.
+    # Per-packet analysis: ping_pong -> sender, rssi -> receiver
     source = "sender" if mode == "ping_pong" else "receiver"
     df = pd.read_sql_query(
         """
         SELECT seq, tx_us, rx_us, rtt_us, rssi, crc_ok, lost
         FROM packets
-        WHERE run_id = ? AND source = ? AND warmup = 0
+        WHERE run_id = %s AND source = %s AND warmup = FALSE
         """,
         conn,
         params=(run_id, source),
     )
 
     total = len(df)
-    lost_df = df[df["lost"] == 1]
-    crc_err_df = df[df["crc_ok"] == 0]
-    # For ping_pong, valid = not lost and has RTT. For flood, valid = not lost.
+    lost_df = df[df["lost"] == True]  # noqa: E712
+    crc_err_df = df[df["crc_ok"] == False]  # noqa: E712
+
     if mode == "ping_pong":
-        valid = df[(df["lost"] == 0) & (df["rtt_us"] > 0)]
+        valid = df[(df["lost"] == False) & (df["rtt_us"] > 0)]  # noqa: E712
     else:
-        valid = df[df["lost"] == 0]
+        valid = df[df["lost"] == False]  # noqa: E712
 
     packet_loss_pct = (len(lost_df) / total * 100) if total > 0 else 0.0
     crc_error_pct = (len(crc_err_df) / total * 100) if total > 0 else 0.0
@@ -131,11 +130,9 @@ def compute_run_stats(conn: sqlite3.Connection, run_id: int) -> RunStats:
         rtt_p95 = float(np.percentile(rtts, 95))
         rtt_p99 = float(np.percentile(rtts, 99))
 
-        # 95% confidence interval
         ci = stats.t.interval(0.95, len(rtts) - 1, loc=rtt_mean, scale=stats.sem(rtts))
         ci95_low, ci95_high = float(ci[0]), float(ci[1])
 
-        # Jitter: mean absolute difference of consecutive RTTs
         diffs = np.abs(np.diff(rtts))
         jitter = float(np.mean(diffs)) if len(diffs) > 0 else None
 
@@ -145,27 +142,11 @@ def compute_run_stats(conn: sqlite3.Connection, run_id: int) -> RunStats:
     rssi_mean = float(rssi_data.mean()) if len(rssi_data) > 0 else None
     rssi_std = float(rssi_data.std()) if len(rssi_data) > 1 else None
 
-    # Throughput (flood mode)
-    throughput = None
-    if mode == "flood" and len(valid) > 1:
-        rx_df = pd.read_sql_query(
-            """
-            SELECT rx_us FROM packets
-            WHERE run_id = ? AND source = 'receiver' AND warmup = 0 AND lost = 0
-            ORDER BY rx_us
-            """,
-            conn,
-            params=(run_id,),
-        )
-        if len(rx_df) > 1:
-            rx_times = rx_df["rx_us"].values.astype(float)
-            duration_us = rx_times[-1] - rx_times[0]
-            throughput = _compute_flood_throughput(protocol, payload_size, len(rx_df), duration_us)
-
     return RunStats(
         run_id=run_id,
         test_name=test_name,
         mode=mode,
+        protocol=protocol,
         payload_size=payload_size,
         packets_measured=len(valid),
         rtt_mean_us=rtt_mean,
@@ -180,16 +161,33 @@ def compute_run_stats(conn: sqlite3.Connection, run_id: int) -> RunStats:
         jitter_us=jitter,
         rssi_mean=rssi_mean,
         rssi_std=rssi_std,
-        throughput_bps=throughput,
+        throughput_bps=None,
     )
 
 
-def compute_all_stats(db_path: str) -> pd.DataFrame:
-    """Compute stats for all runs in the database."""
-    conn = sqlite3.connect(db_path)
-    run_ids = [
-        row[0] for row in conn.execute("SELECT run_id FROM test_runs").fetchall()
-    ]
+def compute_all_stats(
+    experiment_id: int | None = None,
+    protocol: str | None = None,
+) -> pd.DataFrame:
+    """Compute stats for all valid runs in the database.
+
+    When *experiment_id* is provided, only runs belonging to that experiment
+    are included.  When *protocol* is provided, only runs matching that
+    protocol are included.
+    """
+    conn = get_connection()
+    cur = conn.cursor()
+    query = "SELECT run_id FROM test_runs WHERE valid = TRUE"
+    params: list = []
+    if experiment_id is not None:
+        query += " AND experiment_id = %s"
+        params.append(experiment_id)
+    if protocol is not None:
+        query += " AND protocol = %s"
+        params.append(protocol)
+    cur.execute(query, params)
+    run_ids = [row[0] for row in cur.fetchall()]
+    cur.close()
 
     results = []
     for run_id in run_ids:

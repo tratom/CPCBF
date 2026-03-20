@@ -22,16 +22,15 @@ def _skeleton(scenario_id: str) -> dict:
     """Return a minimal experiment.json skeleton."""
     return {
         "scenario_id": scenario_id,
-        "test_procedure_description": "",
-        "environmental_description": "",
         "location": "",
         "test_date": date.today().isoformat(),
-        "test_configuration": {
-            "technology": "",
-            "distance_meters": 0,
-            "samples_per_scenario": 1,
-            "iteration_duration_minutes": 0,
-            "measured_metrics": [],
+        "distance_meters": 0,
+        "test_procedure_description": "",
+        "environmental_description": "",
+        "dynamic_interference": {
+            "pedestrians_observed": 0,
+            "vehicles_observed": 0,
+            "notes": "",
         },
         "devices": [
             {
@@ -51,11 +50,6 @@ def _skeleton(scenario_id: str) -> dict:
                 "notes": "",
             },
         ],
-        "dynamic_interference": {
-            "pedestrians_observed": 0,
-            "vehicles_observed": 0,
-            "notes": "",
-        },
         "media_files": [],
     }
 

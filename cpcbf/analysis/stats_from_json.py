@@ -51,8 +51,11 @@ def compute_stats_from_record(rec: dict) -> RunStats:
     protocol = rec.get("protocol", "wifi")
     payload_size = rec.get("payload_size", 0)
 
-    # Source selection: ping_pong → sender (has RTT), flood → receiver
-    source = "sender" if mode == "ping_pong" else "receiver"
+    # Source selection: ping_pong → sender (has RTT), rssi → receiver, flood → receiver
+    if mode == "ping_pong":
+        source = "sender"
+    else:
+        source = "receiver"
     side_data = rec.get(source, {})
     packets = side_data.get("packets", [])
     is_aggregate = bool(side_data.get("aggregate_only"))
@@ -316,12 +319,9 @@ def _print_metadata_header(path: Path) -> None:
     if meta.get("test_date"):
         print(f"Date:       {meta['test_date']}")
 
-    cfg = meta.get("test_configuration", {})
     parts = []
-    if cfg.get("technology"):
-        parts.append(cfg["technology"])
-    if cfg.get("distance_meters"):
-        parts.append(f"Distance: {cfg['distance_meters']}m")
+    if meta.get("distance_meters"):
+        parts.append(f"Distance: {meta['distance_meters']}m")
     if parts:
         print(f"Config:     {' | '.join(parts)}")
 

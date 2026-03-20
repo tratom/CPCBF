@@ -5,8 +5,11 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import mimetypes
+import re
 from pathlib import Path
 
+import psycopg2
 import psycopg2.extras
 
 from .db import ensure_database, get_connection
@@ -16,10 +19,16 @@ log = logging.getLogger(__name__)
 
 SCHEMA_DDL = """
 CREATE TABLE IF NOT EXISTS experiments (
-    experiment_id   SERIAL PRIMARY KEY,
-    name            TEXT NOT NULL UNIQUE,
-    description     TEXT,
-    created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    experiment_id             SERIAL PRIMARY KEY,
+    name                      TEXT NOT NULL UNIQUE,
+    description               TEXT,
+    created_at                TIMESTAMPTZ NOT NULL DEFAULT now(),
+    location                  TEXT,
+    test_date                 DATE,
+    distance_meters           REAL,
+    test_procedure            TEXT,
+    environment_description   TEXT,
+    interference_json         JSONB
 );
 
 CREATE TABLE IF NOT EXISTS test_runs (
@@ -36,17 +45,26 @@ CREATE TABLE IF NOT EXISTS test_runs (
     clock_offset_us DOUBLE PRECISION,
     timestamp       DOUBLE PRECISION NOT NULL,
     valid           BOOLEAN NOT NULL DEFAULT TRUE,
-    sender_start_us      BIGINT,
-    sender_end_us        BIGINT,
-    sender_packets_sent  INTEGER,
-    receiver_start_us    BIGINT,
-    receiver_end_us      BIGINT,
-    receiver_packets_rcv INTEGER,
-    receiver_crc_errors  INTEGER,
-    aggregate_only       BOOLEAN NOT NULL DEFAULT FALSE,
     UNIQUE (test_name, timestamp)
 );
 
+CREATE TABLE IF NOT EXISTS flood_runs (
+    run_id                  INTEGER PRIMARY KEY REFERENCES test_runs(run_id) ON DELETE CASCADE,
+    sender_warmup_count     INTEGER,
+    sender_measured_count   INTEGER,
+    sender_start_us         BIGINT,
+    sender_end_us           BIGINT,
+    sender_lost             INTEGER,
+    sender_crc_errors       INTEGER,
+    receiver_warmup_count   INTEGER,
+    receiver_measured_count INTEGER,
+    receiver_start_us       BIGINT,
+    receiver_end_us         BIGINT,
+    receiver_lost           INTEGER,
+    receiver_crc_errors     INTEGER
+);
+
+-- Per-packet data: ONLY for RTT (sender) and RSSI (receiver)
 CREATE TABLE IF NOT EXISTS packets (
     id       BIGSERIAL PRIMARY KEY,
     run_id   INTEGER NOT NULL REFERENCES test_runs(run_id),
@@ -66,16 +84,6 @@ CREATE INDEX IF NOT EXISTS idx_packets_run_source_warmup ON packets(run_id, sour
 CREATE INDEX IF NOT EXISTS idx_test_runs_experiment ON test_runs(experiment_id);
 CREATE INDEX IF NOT EXISTS idx_test_runs_valid ON test_runs(valid) WHERE valid = TRUE;
 
--- Experiment metadata columns (nullable for backward compatibility)
-ALTER TABLE experiments ADD COLUMN IF NOT EXISTS location TEXT;
-ALTER TABLE experiments ADD COLUMN IF NOT EXISTS test_date DATE;
-ALTER TABLE experiments ADD COLUMN IF NOT EXISTS technology TEXT;
-ALTER TABLE experiments ADD COLUMN IF NOT EXISTS distance_meters REAL;
-ALTER TABLE experiments ADD COLUMN IF NOT EXISTS test_procedure TEXT;
-ALTER TABLE experiments ADD COLUMN IF NOT EXISTS environment_description TEXT;
-ALTER TABLE experiments ADD COLUMN IF NOT EXISTS test_config_json JSONB;
-ALTER TABLE experiments ADD COLUMN IF NOT EXISTS interference_json JSONB;
-
 -- Devices per experiment
 CREATE TABLE IF NOT EXISTS experiment_devices (
     device_id     SERIAL PRIMARY KEY,
@@ -83,8 +91,10 @@ CREATE TABLE IF NOT EXISTS experiment_devices (
     role          TEXT NOT NULL,
     device_name   TEXT NOT NULL,
     hardware      TEXT,
-    ip_address    TEXT,
-    mac_address   TEXT,
+    local_ip      TEXT,
+    peer_addr     TEXT,
+    peer_mac      TEXT,
+    ble_mac_peer  TEXT,
     notes         TEXT,
     UNIQUE (experiment_id, role, device_name)
 );
@@ -96,6 +106,8 @@ CREATE TABLE IF NOT EXISTS experiment_media (
     file_name     TEXT NOT NULL,
     description   TEXT,
     relative_path TEXT NOT NULL,
+    mime_type     TEXT,
+    data          BYTEA,
     UNIQUE (experiment_id, file_name)
 );
 
@@ -126,22 +138,43 @@ def resolve_experiment(conn, name: str) -> int:
     return experiment_id
 
 
+def _compute_side_aggregates(side_data: dict) -> dict:
+    """Compute warmup/measured counts, time span, lost, CRC from packets."""
+    packets = side_data.get("packets", [])
+    warmup_pkts = [p for p in packets if p.get("warmup")]
+    measured_pkts = [p for p in packets if not p.get("warmup")]
+
+    # Time span from measured packets
+    role = side_data.get("role", "sender")
+    ts_key = "rx_us" if role == "receiver" else "tx_us"
+    times = [p[ts_key] for p in measured_pkts if p.get(ts_key, 0) > 0]
+
+    return {
+        "warmup_count": len(warmup_pkts),
+        "measured_count": len(measured_pkts),
+        "start_us": times[0] if times else None,
+        "end_us": times[-1] if times else None,
+        "lost": sum(1 for p in measured_pkts if p.get("lost")),
+        "crc_errors": sum(1 for p in measured_pkts if not p.get("crc_ok")),
+    }
+
+
 def ingest_run(conn, experiment_id: int, result: dict) -> int | None:
-    """Insert one test run from a JSONL line. Returns run_id or None if duplicate."""
+    """Insert one test run. Returns run_id or None if duplicate.
+
+    The result dict must have top-level metadata and optionally:
+    - sender_agg / receiver_agg: pre-computed aggregates
+    - packets: list of packet dicts to insert (mode-filtered by caller)
+    - packets_source: 'sender' or 'receiver' (which side the packets came from)
+    """
     cur = conn.cursor()
-    sender_data = result.get("sender", {})
-    receiver_data = result.get("receiver", {})
-    is_aggregate = bool(sender_data.get("aggregate_only") or receiver_data.get("aggregate_only"))
 
     cur.execute(
         """
         INSERT INTO test_runs
             (experiment_id, test_name, mode, protocol, board, payload_size,
-             repetitions, warmup, topology, clock_offset_us, timestamp,
-             sender_start_us, sender_end_us, sender_packets_sent,
-             receiver_start_us, receiver_end_us, receiver_packets_rcv,
-             receiver_crc_errors, aggregate_only)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+             repetitions, warmup, topology, clock_offset_us, timestamp)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (test_name, timestamp) DO NOTHING
         RETURNING run_id
         """,
@@ -157,14 +190,6 @@ def ingest_run(conn, experiment_id: int, result: dict) -> int | None:
             result.get("topology"),
             result.get("clock_offset_us"),
             result["timestamp"],
-            sender_data.get("start_us"),
-            sender_data.get("end_us"),
-            sender_data.get("packets_sent"),
-            receiver_data.get("start_us"),
-            receiver_data.get("end_us"),
-            receiver_data.get("packets_received"),
-            receiver_data.get("crc_errors"),
-            is_aggregate,
         ),
     )
     row = cur.fetchone()
@@ -174,11 +199,41 @@ def ingest_run(conn, experiment_id: int, result: dict) -> int | None:
         return None
     run_id = row[0]
 
-    for source in ("sender", "receiver"):
-        side_data = result.get(source, {})
-        packets = side_data.get("packets", [])
-        if not packets:
-            continue
+    # Flood mode: store aggregates in separate table
+    if result["mode"] == "flood":
+        sender_agg = result.get("sender_agg", {})
+        receiver_agg = result.get("receiver_agg", {})
+        cur.execute(
+            """
+            INSERT INTO flood_runs
+                (run_id,
+                 sender_warmup_count, sender_measured_count,
+                 sender_start_us, sender_end_us, sender_lost, sender_crc_errors,
+                 receiver_warmup_count, receiver_measured_count,
+                 receiver_start_us, receiver_end_us, receiver_lost, receiver_crc_errors)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                run_id,
+                sender_agg.get("warmup_count"),
+                sender_agg.get("measured_count"),
+                sender_agg.get("start_us"),
+                sender_agg.get("end_us"),
+                sender_agg.get("lost"),
+                sender_agg.get("crc_errors"),
+                receiver_agg.get("warmup_count"),
+                receiver_agg.get("measured_count"),
+                receiver_agg.get("start_us"),
+                receiver_agg.get("end_us"),
+                receiver_agg.get("lost"),
+                receiver_agg.get("crc_errors"),
+            ),
+        )
+
+    # Insert per-packet data (already mode-filtered by caller)
+    packets = result.get("packets", [])
+    source = result.get("packets_source")
+    if packets and source:
         rows = [
             (
                 run_id,
@@ -203,6 +258,7 @@ def ingest_run(conn, experiment_id: int, result: dict) -> int | None:
             VALUES %s
             """,
             rows,
+            page_size=5000,
         )
 
     conn.commit()
@@ -210,87 +266,132 @@ def ingest_run(conn, experiment_id: int, result: dict) -> int | None:
     return run_id
 
 
-def ingest_experiment_metadata(conn, experiment_id: int, metadata: dict) -> None:
-    """Write experiment metadata into DB (UPDATE experiments + UPSERT children)."""
-    cur = conn.cursor()
+def _merge_receiver_rssi(sender_packets: list[dict], receiver_packets: list[dict]) -> None:
+    """Merge receiver RSSI values into sender packets by seq number (in-place)."""
+    rssi_by_seq = {}
+    for p in receiver_packets:
+        rssi = p.get("rssi", 0)
+        if rssi != 0:
+            rssi_by_seq[p["seq"]] = rssi
+    for p in sender_packets:
+        if p.get("rssi", 0) == 0 and p["seq"] in rssi_by_seq:
+            p["rssi"] = rssi_by_seq[p["seq"]]
 
-    test_config = metadata.get("test_configuration", {})
 
-    cur.execute(
-        """
-        UPDATE experiments SET
-            location = %s,
-            test_date = %s,
-            technology = %s,
-            distance_meters = %s,
-            test_procedure = %s,
-            environment_description = %s,
-            test_config_json = %s,
-            interference_json = %s
-        WHERE experiment_id = %s
-        """,
-        (
-            metadata.get("location"),
-            metadata.get("test_date"),
-            test_config.get("technology"),
-            test_config.get("distance_meters"),
-            metadata.get("test_procedure_description"),
-            metadata.get("environmental_description"),
-            json.dumps(test_config) if test_config else None,
-            json.dumps(metadata["dynamic_interference"])
-            if metadata.get("dynamic_interference")
-            else None,
-            experiment_id,
-        ),
-    )
+def ingest_directory(dir_path: Path, experiment_name: str | None = None) -> int:
+    """Ingest a flat directory of auto_bench sender/receiver JSONL files.
 
-    for dev in metadata.get("devices", []):
-        cur.execute(
-            """
-            INSERT INTO experiment_devices
-                (experiment_id, role, device_name, hardware, ip_address, mac_address, notes)
-            VALUES (%s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (experiment_id, role, device_name) DO UPDATE SET
-                hardware   = EXCLUDED.hardware,
-                ip_address = EXCLUDED.ip_address,
-                mac_address = EXCLUDED.mac_address,
-                notes      = EXCLUDED.notes
-            """,
-            (
-                experiment_id,
-                dev.get("role", ""),
-                dev.get("device_id", ""),
-                dev.get("hardware"),
-                dev.get("ip_address"),
-                dev.get("mac_address"),
-                dev.get("notes"),
-            ),
-        )
+    Groups files by test name, computes aggregates, and stores only the
+    relevant per-packet data per mode:
+    - ping_pong: sender packets only (has rtt_us)
+    - rssi: receiver packets only (has rssi values)
+    - flood: no packets (aggregates only)
 
-    for media in metadata.get("media_files", []):
-        cur.execute(
-            """
-            INSERT INTO experiment_media
-                (experiment_id, file_name, description, relative_path)
-            VALUES (%s, %s, %s, %s)
-            ON CONFLICT (experiment_id, file_name) DO UPDATE SET
-                description   = EXCLUDED.description,
-                relative_path = EXCLUDED.relative_path
-            """,
-            (
-                experiment_id,
-                media.get("file_name", ""),
-                media.get("description"),
-                media.get("path", ""),
-            ),
-        )
+    Returns the number of new runs ingested.
+    """
+    dir_path = Path(dir_path).resolve()
+    if experiment_name is None:
+        experiment_name = dir_path.name
 
-    conn.commit()
-    cur.close()
+    ensure_database()
+    conn = get_connection()
+    init_db(conn)
+    experiment_id = resolve_experiment(conn, experiment_name)
+
+    # Auto-load experiment metadata if present
+    try:
+        metadata = load_experiment_metadata(dir_path)
+        if metadata is not None:
+            ingest_experiment_metadata(conn, experiment_id, metadata, base_dir=dir_path)
+            log.info("Ingested experiment metadata for %s", experiment_name)
+    except Exception as e:
+        log.warning("Skipping experiment metadata: %s", e)
+
+    # Group JSONL files by test name
+    groups: dict[str, dict[str, Path]] = {}
+    for f in dir_path.glob("*.jsonl"):
+        match = re.match(r"(.+)_(sender|receiver)\.jsonl$", f.name)
+        if not match:
+            continue
+        test_key = match.group(1)
+        role = match.group(2)
+        groups.setdefault(test_key, {})[role] = f
+
+    count = 0
+    for test_key in sorted(groups):
+        pair = groups[test_key]
+
+        # Load both sides
+        sides: dict[str, dict] = {}
+        meta: dict = {}
+        for role in ("sender", "receiver"):
+            if role not in pair:
+                continue
+            with open(pair[role]) as fh:
+                data = json.loads(fh.readline())
+            sides[role] = data.pop(role, {})
+            if not meta:
+                meta = data
+
+        mode = meta.get("mode", "ping_pong")
+        sender_data = sides.get("sender", {})
+        receiver_data = sides.get("receiver", {})
+
+        # Compute aggregates only for flood (RTT/RSSI have all packets stored)
+        if mode == "flood":
+            sender_agg = _compute_side_aggregates(sender_data) if sender_data else {}
+            receiver_agg = _compute_side_aggregates(receiver_data) if receiver_data else {}
+        else:
+            sender_agg = {}
+            receiver_agg = {}
+
+        # Mode-aware packet selection
+        packets = []
+        packets_source = None
+        if mode == "ping_pong":
+            # Merge receiver RSSI into sender packets for ping_pong
+            if receiver_data:
+                _merge_receiver_rssi(
+                    sender_data.get("packets", []),
+                    receiver_data.get("packets", []),
+                )
+            packets = sender_data.get("packets", [])
+            packets_source = "sender"
+        elif mode == "rssi":
+            packets = receiver_data.get("packets", [])
+            packets_source = "receiver"
+        # flood: no packets stored
+
+        # Build the combined record
+        combined = {
+            "test_name": meta.get("test_name", test_key),
+            "mode": mode,
+            "protocol": meta.get("protocol", "wifi"),
+            "board": meta.get("board", "rpi4"),
+            "payload_size": meta.get("payload_size", 0),
+            "repetitions": meta.get("repetitions", 0),
+            "warmup": meta.get("warmup", 0),
+            "topology": meta.get("topology"),
+            "clock_offset_us": meta.get("clock_offset_us"),
+            "timestamp": meta.get("timestamp", 0),
+            "sender_agg": sender_agg,
+            "receiver_agg": receiver_agg,
+            "packets": packets,
+            "packets_source": packets_source,
+        }
+
+        run_id = ingest_run(conn, experiment_id, combined)
+        if run_id is not None:
+            count += 1
+            present = "+".join(sorted(pair.keys()))
+            log.info("  %s (%s) -> run_id=%d", test_key, present, run_id)
+
+    conn.close()
+    return count
 
 
 def ingest_jsonl(jsonl_path: str | Path, experiment_name: str | None = None) -> int:
-    """Ingest all results from a JSONL file into PostgreSQL.
+    """Ingest all results from a merged JSONL file into PostgreSQL.
 
     Returns the number of new runs ingested.
     """
@@ -307,7 +408,7 @@ def ingest_jsonl(jsonl_path: str | Path, experiment_name: str | None = None) -> 
     try:
         metadata = load_experiment_metadata(jsonl_path.parent)
         if metadata is not None:
-            ingest_experiment_metadata(conn, experiment_id, metadata)
+            ingest_experiment_metadata(conn, experiment_id, metadata, base_dir=jsonl_path.parent)
             log.info("Ingested experiment metadata for %s", experiment_name)
     except Exception as e:
         log.warning("Skipping experiment metadata: %s", e)
@@ -318,13 +419,145 @@ def ingest_jsonl(jsonl_path: str | Path, experiment_name: str | None = None) -> 
             line = line.strip()
             if not line:
                 continue
-            result = json.loads(line)
+            raw = json.loads(line)
+
+            # Convert merged JSONL format to ingest_run format
+            mode = raw.get("mode", "ping_pong")
+            sender_data = raw.get("sender", {})
+            receiver_data = raw.get("receiver", {})
+
+            if mode == "flood":
+                sender_agg = _compute_side_aggregates(sender_data) if sender_data else {}
+                receiver_agg = _compute_side_aggregates(receiver_data) if receiver_data else {}
+            else:
+                sender_agg = {}
+                receiver_agg = {}
+
+            packets = []
+            packets_source = None
+            if mode == "ping_pong":
+                packets = sender_data.get("packets", [])
+                packets_source = "sender"
+            elif mode == "rssi":
+                packets = receiver_data.get("packets", [])
+                packets_source = "receiver"
+
+            result = {
+                "test_name": raw["test_name"],
+                "mode": mode,
+                "protocol": raw["protocol"],
+                "board": raw["board"],
+                "payload_size": raw["payload_size"],
+                "repetitions": raw["repetitions"],
+                "warmup": raw["warmup"],
+                "topology": raw.get("topology"),
+                "clock_offset_us": raw.get("clock_offset_us"),
+                "timestamp": raw["timestamp"],
+                "sender_agg": sender_agg,
+                "receiver_agg": receiver_agg,
+                "packets": packets,
+                "packets_source": packets_source,
+            }
+
             run_id = ingest_run(conn, experiment_id, result)
             if run_id is not None:
                 count += 1
 
     conn.close()
     return count
+
+
+def ingest_experiment_metadata(
+    conn, experiment_id: int, metadata: dict, *, base_dir: Path | None = None,
+) -> None:
+    """Write experiment metadata into DB (UPDATE experiments + UPSERT children)."""
+    cur = conn.cursor()
+
+    cur.execute(
+        """
+        UPDATE experiments SET
+            location = %s,
+            test_date = %s,
+            distance_meters = %s,
+            test_procedure = %s,
+            environment_description = %s,
+            interference_json = %s
+        WHERE experiment_id = %s
+        """,
+        (
+            metadata.get("location"),
+            metadata.get("test_date"),
+            metadata.get("distance_meters"),
+            metadata.get("test_procedure_description"),
+            metadata.get("environmental_description"),
+            json.dumps(metadata["dynamic_interference"])
+            if metadata.get("dynamic_interference")
+            else None,
+            experiment_id,
+        ),
+    )
+
+    for dev in metadata.get("devices", []):
+        cur.execute(
+            """
+            INSERT INTO experiment_devices
+                (experiment_id, role, device_name, hardware,
+                 local_ip, peer_addr, peer_mac, ble_mac_peer, notes)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (experiment_id, role, device_name) DO UPDATE SET
+                hardware     = EXCLUDED.hardware,
+                local_ip     = EXCLUDED.local_ip,
+                peer_addr    = EXCLUDED.peer_addr,
+                peer_mac     = EXCLUDED.peer_mac,
+                ble_mac_peer = EXCLUDED.ble_mac_peer,
+                notes        = EXCLUDED.notes
+            """,
+            (
+                experiment_id,
+                dev.get("role", ""),
+                dev.get("device_id", ""),
+                dev.get("hardware"),
+                dev.get("local_ip"),
+                dev.get("peer_addr"),
+                dev.get("peer_mac"),
+                dev.get("ble_mac_peer"),
+                dev.get("notes"),
+            ),
+        )
+
+    for media in metadata.get("media_files", []):
+        rel_path = media.get("path", "")
+        file_data = None
+        mime_type = None
+        if base_dir and rel_path:
+            abs_path = base_dir / rel_path
+            if abs_path.is_file():
+                file_data = psycopg2.Binary(abs_path.read_bytes())
+                mime_type = mimetypes.guess_type(abs_path.name)[0]
+
+        cur.execute(
+            """
+            INSERT INTO experiment_media
+                (experiment_id, file_name, description, relative_path, mime_type, data)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            ON CONFLICT (experiment_id, file_name) DO UPDATE SET
+                description   = EXCLUDED.description,
+                relative_path = EXCLUDED.relative_path,
+                mime_type     = EXCLUDED.mime_type,
+                data          = EXCLUDED.data
+            """,
+            (
+                experiment_id,
+                media.get("file_name", ""),
+                media.get("description"),
+                rel_path,
+                mime_type,
+                file_data,
+            ),
+        )
+
+    conn.commit()
+    cur.close()
 
 
 def main():
@@ -334,29 +567,28 @@ def main():
     parser.add_argument(
         "path",
         type=Path,
-        help="JSONL file or directory containing JSONL files",
+        help="Directory of sender/receiver JSONL files, or a merged JSONL file",
     )
     parser.add_argument(
         "--experiment",
         type=str,
         default=None,
-        help="Experiment name (default: parent directory name)",
+        help="Experiment name (default: directory name)",
     )
     args = parser.parse_args()
 
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
+
     path = args.path
     if path.is_dir():
-        files = sorted(path.glob("**/*.jsonl"))
+        n = ingest_directory(path, experiment_name=args.experiment)
+        print(f"Ingested {n} new runs from {path}")
+    elif path.is_file() and path.suffix == ".jsonl":
+        n = ingest_jsonl(path, experiment_name=args.experiment)
+        print(f"Ingested {n} new runs from {path}")
     else:
-        files = [path]
-
-    total = 0
-    for f in files:
-        n = ingest_jsonl(f, experiment_name=args.experiment)
-        print(f"{f}: {n} new runs ingested")
-        total += n
-
-    print(f"Total: {total} new runs ingested")
+        print(f"Error: {path} is not a directory or JSONL file")
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

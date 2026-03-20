@@ -14,4 +14,6 @@ tests:
     mode: flood
     protocol: wifi
     board: mkr_wifi_1010
-    payload_sizes: [1024]
+    payload_sizes: [508, 1432]
+
+# The 1446-byte limit in the WiFiNINA library - 14 bench header
