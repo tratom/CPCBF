@@ -6,6 +6,8 @@
  */
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#include <WiFiNINA.h>
+#include <ArduinoBLE.h>
 #include "config.h"
 
 extern "C" {
@@ -16,8 +18,9 @@ extern "C" {
 #include "sync_barrier.h"
 }
 
-/* External adapter defined in wifi_adapter_nina.cpp */
+/* External adapters */
 extern "C" protocol_adapter_t wifi_nina_adapter;
+extern "C" protocol_adapter_t ble_nina_adapter;
 
 /* Agent state */
 static adapter_config_t g_adapter_cfg;
@@ -84,11 +87,29 @@ static void handle_configure(JsonObject params)
             g_adapter_cfg.role = ROLE_RECEIVER;
     }
 
-    /* Topology: softap is the only mode for this board */
-    g_adapter_cfg.topology = TOPO_P2P;
+    /* Tear down previous adapter if switching protocol */
+    if (g_adapter_ready && g_active_adapter) {
+        g_active_adapter->deinit(g_active_adapter);
+        g_adapter_ready = 0;
+    }
 
-    /* Always WiFi on this board */
-    g_active_adapter = &wifi_nina_adapter;
+    /* Topology selection */
+    if (params["topology"].is<const char *>()) {
+        const char *topo = params["topology"].as<const char *>();
+        if (strcmp(topo, "ble_gatt") == 0)
+            g_adapter_cfg.topology = TOPO_BLE_GATT;
+        else
+            g_adapter_cfg.topology = TOPO_P2P;
+    } else {
+        g_adapter_cfg.topology = TOPO_P2P;
+    }
+
+    /* Protocol/adapter selection */
+    if (params["protocol"].is<const char *>() &&
+        strcmp(params["protocol"].as<const char *>(), "ble") == 0)
+        g_active_adapter = &ble_nina_adapter;
+    else
+        g_active_adapter = &wifi_nina_adapter;
 
     /* Test config */
     memset(&g_test_cfg, 0, sizeof(g_test_cfg));
@@ -119,8 +140,15 @@ static void handle_configure(JsonObject params)
 
 static void handle_radio_disable(JsonObject params)
 {
-    (void)params;
-    /* NINA only has WiFi — disable is a no-op */
+    const char *subsystem = "all";
+    if (params["subsystem"].is<const char *>())
+        subsystem = params["subsystem"].as<const char *>();
+
+    if (strcmp(subsystem, "wifi") == 0 || strcmp(subsystem, "all") == 0)
+        WiFi.end();
+    if (strcmp(subsystem, "bluetooth") == 0 || strcmp(subsystem, "all") == 0)
+        BLE.end();
+
     send_ok("radio disabled");
 }
 
@@ -130,12 +158,15 @@ static void handle_radio_status()
     doc["status"] = "ok";
     doc["message"] = "radio status";
     JsonObject data = doc["data"].to<JsonObject>();
-    data["wifi_active"] = true;
-    data["bluetooth_active"] = false;
+    /* Report based on which adapter is currently active */
+    bool ble_active = (g_active_adapter == &ble_nina_adapter) && g_adapter_ready;
+    bool wifi_active = (g_active_adapter == &wifi_nina_adapter) && g_adapter_ready;
+    data["wifi_active"] = wifi_active;
+    data["bluetooth_active"] = ble_active;
     send_json(doc);
 }
 
-static void handle_wifi_setup()
+static void handle_link_setup()
 {
     if (!g_configured || !g_active_adapter) {
         send_error("not configured");
@@ -154,13 +185,13 @@ static void handle_wifi_setup()
     }
 
     g_adapter_ready = 1;
-    send_ok("wifi setup complete");
+    send_ok("link setup complete");
 }
 
 static void handle_sync(JsonObject params)
 {
     if (!g_adapter_ready || !g_active_adapter) {
-        send_error("adapter not ready — run WIFI_SETUP first");
+        send_error("adapter not ready — run WIFI_SETUP or BLE_SETUP first");
         return;
     }
 
@@ -313,7 +344,9 @@ void loop()
     } else if (strcmp(command, "RADIO_STATUS") == 0) {
         handle_radio_status();
     } else if (strcmp(command, "WIFI_SETUP") == 0) {
-        handle_wifi_setup();
+        handle_link_setup();
+    } else if (strcmp(command, "BLE_SETUP") == 0) {
+        handle_link_setup();
     } else if (strcmp(command, "SYNC") == 0) {
         handle_sync(params);
     } else if (strcmp(command, "START") == 0) {

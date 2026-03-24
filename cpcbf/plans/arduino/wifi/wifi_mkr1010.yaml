@@ -1,6 +1,6 @@
 global:
   warmup: 10
-  timeout_ms: 500
+  timeout_ms: 1000
   port: 5201
   channel: 1
   topology: softap
@@ -28,16 +28,16 @@ tests:
     payload_sizes: [32]
 
 # throughput test with no pacing to get max throughput (aggregate-only on MKR)
-# 1024B payload = max safe size for WiFiNINA SPI bridge (vs 1458B on RPi4)
+# 1432B payload + 14B bench header = 1446B, WiFiNINA max UDP payload
 # aggregate_only is set automatically for flood mode on Arduino firmware
   - name: wifi_mkr1010_flood
     mode: flood
     protocol: wifi
     board: mkr_wifi_1010
-    repetitions: 2100000
+    repetitions: 85000
     inter_packet_us: 0
-    payload_sizes: [1024]
+    payload_sizes: [508, 1432]
 
-# total number of packets: 110 (RSSI) + 310 (RTT) + 2100000 (flood) = 2100420 packets
-# total exec time ~10 minutes (same as RPi4 plan)
+# total number of packets: 110 (RSSI) + 310 (RTT) + 85000 * 2 (flood) = 170400 packets
+# total exec time ~15 minutes (same as RPi4 plan)
 # 15 s * 3 for cooldown + reconnection time = ~1 minute

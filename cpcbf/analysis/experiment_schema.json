@@ -18,6 +18,11 @@
       "format": "date",
       "description": "Date the test was performed (YYYY-MM-DD)"
     },
+    "duration_minutes": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "Duration of the test in minutes"
+    },
     "distance_meters": {
       "type": "number",
       "minimum": 0,
@@ -39,6 +44,10 @@
           "minimum": 0
         },
         "vehicles_observed": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "vehicles_parked": {
           "type": "integer",
           "minimum": 0
         },

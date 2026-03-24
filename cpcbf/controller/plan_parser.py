@@ -39,8 +39,13 @@ def _validate_plan(plan: TestPlan) -> None:
                 f"Test '{test.name}': minimum 30 repetitions required, got {test.repetitions}"
             )
 
-        # Payload sizes must be in valid range for the target board
-        max_payload = 1024 if test.board == "mkr_wifi_1010" else 8192
+        # Payload sizes must be in valid range for the target board/protocol
+        if test.protocol == "ble" and test.board == "mkr_wifi_1010":
+            max_payload = 230  # ATT 247 - 3 header - 14 bench overhead
+        elif test.board == "mkr_wifi_1010":
+            max_payload = 1432
+        else:
+            max_payload = 8192
         for size in test.payload_sizes:
             if size < 0 or size > max_payload:
                 raise ValueError(

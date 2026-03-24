@@ -48,6 +48,27 @@ class Orchestrator:
 
         is_sender = role == "sender"
 
+        if test.protocol == "ble" and test.board == "mkr_wifi_1010":
+            return {
+                "iface_name": "",
+                "peer_addr": "",
+                "peer_mac": "",  # ArduinoBLE discovers by service UUID
+                "port": 0,
+                "channel": 0,
+                "essid": "",
+                "local_ip": "",
+                "netmask": "",
+                "role": role,
+                "topology": "ble_gatt",
+                "protocol": "ble",
+                "mode": test.mode.value,
+                "payload_size": payload_size,
+                "repetitions": test.repetitions,
+                "warmup": test.warmup,
+                "timeout_ms": test.timeout_ms,
+                "inter_packet_us": test.inter_packet_us,
+            }
+
         if test.protocol == "ble":
             return {
                 "iface_name": "hci0",

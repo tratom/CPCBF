@@ -36,14 +36,25 @@ class RadioIsolation:
         """Disable non-test radios and verify isolation.
 
         For WiFi tests: disable Bluetooth, ensure WiFi is active.
+        For BLE tests on MKR: skip WiFi disable — NINA module shares SPI
+        bus for both protocols, and WiFi.end() corrupts BLE init state.
         """
         for host_id in self._manager.host_ids:
             logger.info("Running isolation preflight on %s", host_id)
 
+            host = self._manager.get_host_info(host_id)
+            is_mkr = getattr(host, "board_type", "") == "mkr_wifi_1010"
+
             if self._protocol == "wifi":
                 self._disable_subsystem(host_id, "bluetooth")
             elif self._protocol in ("bluetooth", "ble"):
-                self._disable_subsystem(host_id, "wifi")
+                if is_mkr:
+                    logger.info(
+                        "Skipping WiFi disable on MKR %s (shared NINA SPI)",
+                        host_id,
+                    )
+                else:
+                    self._disable_subsystem(host_id, "wifi")
 
             # Verify
             status = self._check_status(host_id)

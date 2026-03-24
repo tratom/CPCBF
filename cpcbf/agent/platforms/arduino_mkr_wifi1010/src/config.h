@@ -5,7 +5,8 @@
 #ifndef CPCBF_ARDUINO_CONFIG_H
 #define CPCBF_ARDUINO_CONFIG_H
 
-/* Max payload set via build flag (-DBENCH_MAX_PAYLOAD=1024) */
+/* Max payload set via build flag (-DBENCH_MAX_PAYLOAD=1432)
+ * 1432 + 14 byte bench header = 1446, the WiFiNINA max UDP payload */
 
 /* Maximum stored test results — ~12 KB with 24 bytes per entry.
  * Flood mode uses aggregate_only=1, so this only matters for RTT/RSSI. */
@@ -22,5 +23,12 @@
 #define DEFAULT_ESSID    "CPCBF_MKR"
 #define DEFAULT_CHANNEL  6
 #define DEFAULT_PORT     5201
+
+/* BLE GATT service and characteristic UUIDs */
+#define BLE_SERVICE_UUID       "19B10000-E8F2-537E-4F6C-D104768A1214"
+#define BLE_TX_CHAR_UUID       "19B10001-E8F2-537E-4F6C-D104768A1214"
+#define BLE_RX_CHAR_UUID       "19B10002-E8F2-537E-4F6C-D104768A1214"
+#define BLE_MAX_ATT_PAYLOAD    244
+#define BLE_CONNECT_TIMEOUT_MS 60000
 
 #endif /* CPCBF_ARDUINO_CONFIG_H */

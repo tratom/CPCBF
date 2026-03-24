@@ -3,6 +3,8 @@
  * Implements platform_hal.h for SAMD21 + WiFiNINA.
  */
 #include <Arduino.h>
+#include <WiFiNINA.h>
+#include <ArduinoBLE.h>
 #include <stdarg.h>
 
 extern "C" {
@@ -41,24 +43,27 @@ extern "C" void platform_sleep_us(uint32_t us)
 
 extern "C" int platform_radio_disable(const char *subsystem)
 {
-    (void)subsystem;
-    /* NINA module has WiFi only — no rfkill equivalent */
+    if (strcmp(subsystem, "wifi") == 0 || strcmp(subsystem, "all") == 0)
+        WiFi.end();
+    if (strcmp(subsystem, "bluetooth") == 0 || strcmp(subsystem, "all") == 0)
+        BLE.end();
     return 0;
 }
 
 extern "C" int platform_radio_enable(const char *subsystem)
 {
     (void)subsystem;
+    /* Radios are enabled via adapter init, not this function */
     return 0;
 }
 
 extern "C" int platform_radio_is_active(const char *subsystem)
 {
-    (void)subsystem;
-    /* WiFi is always the only radio; report BT as inactive */
+    if (strcmp(subsystem, "wifi") == 0)
+        return (WiFi.status() != WL_NO_MODULE && WiFi.status() != WL_NO_SHIELD) ? 1 : 0;
     if (strcmp(subsystem, "bluetooth") == 0)
-        return 0;
-    return 1;  /* WiFi active */
+        return BLE.connected() ? 1 : 0;
+    return 0;
 }
 
 extern "C" const char *platform_name(void)

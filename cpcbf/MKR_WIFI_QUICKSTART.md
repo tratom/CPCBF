@@ -89,4 +89,39 @@ The Arduino firmware runs the same JSON command protocol as the RPi4 agent.
 
 - Max payload: 512 bytes (SAMD21 SRAM limit)
 - Max stored results: 110 entries per test run
-- Only WiFi (no BLE benchmarking on this board)
+
+## Troubleshooting
+
+### Check NINA firmware version (BLE diagnostics)
+
+BLE requires NINA firmware >= 1.2.0. To check the version, connect to a board via serial monitor and send BLE setup commands:
+
+```bash
+# Open serial monitor (115200 baud)
+screen /dev/ttyACM0 115200
+```
+
+Then paste these two JSON commands one at a time, pressing Enter after each:
+
+```json
+{"command":"CONFIGURE","params":{"protocol":"ble","topology":"ble_gatt","role":"receiver","mode":"rssi","payload_size":0,"repetitions":100}}
+```
+
+```json
+{"command":"BLE_SETUP"}
+```
+
+Watch the log output for the firmware version line:
+
+```
+ble: NINA firmware version: X.X.X (need >= 1.2.0 for BLE)
+```
+
+If the version is below 1.2.0, update the NINA firmware:
+
+1. Open Arduino IDE
+2. Open **Tools → WiFi101 / WiFiNINA Firmware Updater**
+3. Select the board and flash the latest firmware (>= 1.5.0)
+4. Repeat for all MKR boards
+
+To exit `screen`: press `Ctrl-A` then `K`, then confirm with `y`.

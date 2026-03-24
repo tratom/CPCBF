@@ -70,10 +70,10 @@ cpcbf-ingest results/ --experiment "wifi-garage-20m"
 
 ```bash
 # All protocols
-python -m cpcbf.analysis.run_analysis --experiment "wifi-garage-20m" --output results/
+python -m analysis.run_analysis --experiment "wifi-garage-20m" --output results/
 
 # Single protocol
-python -m cpcbf.analysis.run_analysis --experiment "wifi-garage-20m" --protocol ble --output results/
+python -m analysis.run_analysis --experiment "wifi-garage-20m" --protocol ble --output results/
 ```
 
 ### Console output
@@ -156,6 +156,7 @@ erDiagram
         TIMESTAMPTZ created_at
         TEXT location
         DATE test_date
+        INTEGER duration_minutes
         REAL distance_meters
         TEXT test_procedure
         TEXT environment_description
