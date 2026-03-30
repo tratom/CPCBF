@@ -1,4 +1,4 @@
-# MKR WiFi 1010 Quick Start
+# MKR WiFi 1010 — WiFi Quick Start
 
 ## Prerequisites
 
@@ -9,11 +9,11 @@
 - PlatformIO CLI (`pip install platformio`)
 - Python 3.10+ with `pyserial` on the bridge RPis (`pip install pyserial`)
 
-## 1. Flash firmware
+## 1. Flash WiFi firmware
 
 ```bash
 cd cpcbf/agent/platforms/arduino_mkr_wifi1010
-pio run -t upload --upload-port /dev/ttyACM0
+pio run -e mkrwifi1010_wifi -t upload --upload-port /dev/ttyACM0
 ```
 
 Repeat for the second Arduino (connect to the second RPi or your workstation).
@@ -24,17 +24,17 @@ On a bridge RPi, test that the Arduino responds:
 
 ```bash
 # Install pyserial if needed
-sudo apt install -y python3-serial
+sudo apt install -y python3-serial screen
 
-# Quick test via minicom or screen
+# Quick test via screen
 screen /dev/ttyACM0 115200
 # Type: {"command":"RADIO_STATUS"}
-# Expect: {"status":"ok","message":"radio status","data":{"wifi_active":true,"bluetooth_active":false}}
+# Expect: {"status":"ok","message":"radio status","data":{"wifi_active":false,"bluetooth_active":false}}
 ```
 
 ## 3. Configure inventory
 
-Edit `cpcbf/inventory-lab-mkr.yaml` with:
+Edit `cpcbf/inventory/inventory-lab-mkr.yaml` with:
 - Bridge RPi IP addresses (reachable via Ethernet/SSH)
 - Serial port paths (usually `/dev/ttyACM0`)
 - SSH credentials for the RPis
@@ -52,7 +52,7 @@ From your workstation:
 ```bash
 cd cpcbf
 pip install -e .
-cpcbf plans/wifi_mkr1010_quick_smoke.yaml -i inventory-lab-mkr.yaml -o ./results -v
+cpcbf plans/arduino/wifi/wifi_mkr1010_rssi.yaml -i inventory/inventory-lab-mkr.yaml -o ./results -v
 ```
 
 ## 6. Analyze results
@@ -66,12 +66,12 @@ python run_analysis.py --results results/results.jsonl --output results/
 ```
 Workstation                   Bridge RPi A              Arduino MKR A
 +-----------+   SSH/Ethernet  +-----------+   USB-Serial +-----------+
-| Controller| <-------------> |serial_relay| <---------> | Agent FW  |
+| Controller| <-------------> |serial_relay| <---------> | WiFi FW   |
 +-----------+                 +-----------+              +-----------+
 
                               Bridge RPi B              Arduino MKR B
                               +-----------+   USB-Serial +-----------+
-                              |serial_relay| <---------> | Agent FW  |
+                              |serial_relay| <---------> | WiFi FW   |
                               +-----------+              +-----------+
 ```
 
@@ -87,41 +87,19 @@ The Arduino firmware runs the same JSON command protocol as the RPi4 agent.
 
 ## Constraints
 
-- Max payload: 512 bytes (SAMD21 SRAM limit)
-- Max stored results: 110 entries per test run
+- Max payload: 1432 bytes (WiFiNINA maximum UDP payload)
+- Max stored results: 500 entries per test run
 
 ## Troubleshooting
 
-### Check NINA firmware version (BLE diagnostics)
+### Arduino not responding on serial
 
-BLE requires NINA firmware >= 1.2.0. To check the version, connect to a board via serial monitor and send BLE setup commands:
+1. Check the USB cable is connected and the serial port exists (`ls /dev/ttyACM*`)
+2. Ensure no other process holds the port (kill stale `screen` sessions)
+3. Reset the Arduino (press reset button) and retry
 
-```bash
-# Open serial monitor (115200 baud)
-screen /dev/ttyACM0 115200
-```
+### WiFi SoftAP not connecting
 
-Then paste these two JSON commands one at a time, pressing Enter after each:
-
-```json
-{"command":"CONFIGURE","params":{"protocol":"ble","topology":"ble_gatt","role":"receiver","mode":"rssi","payload_size":0,"repetitions":100}}
-```
-
-```json
-{"command":"BLE_SETUP"}
-```
-
-Watch the log output for the firmware version line:
-
-```
-ble: NINA firmware version: X.X.X (need >= 1.2.0 for BLE)
-```
-
-If the version is below 1.2.0, update the NINA firmware:
-
-1. Open Arduino IDE
-2. Open **Tools → WiFi101 / WiFiNINA Firmware Updater**
-3. Select the board and flash the latest firmware (>= 1.5.0)
-4. Repeat for all MKR boards
-
-To exit `screen`: press `Ctrl-A` then `K`, then confirm with `y`.
+1. Ensure both boards have the WiFi firmware flashed (`pio run -e mkrwifi1010_wifi`)
+2. The sender must start first (creates the AP), then the receiver joins
+3. Check the orchestrator log for IP assignment errors

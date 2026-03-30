@@ -1,0 +1,16 @@
+global:
+  warmup: 10
+  timeout_ms: 5000
+  port: 0
+  channel: 0
+  topology: ble_gatt
+  cooldown_s: 15
+
+tests:
+  - name: ble_mkr1010_rtt
+    mode: ping_pong
+    protocol: ble
+    board: mkr_wifi_1010
+    repetitions: 100
+    inter_packet_us: 1000000    # 1s → 5min
+    payload_sizes: [32]

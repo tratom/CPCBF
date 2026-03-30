@@ -1,7 +1,7 @@
 global:
   repetitions: 100
   warmup: 5
-  timeout_ms: 5000
+  timeout_ms: 500
   inter_packet_us: 500000
   port: 5201
   channel: 1

@@ -206,14 +206,26 @@ static void handle_sync(JsonObject params)
     }
 
     uint32_t timeout_ms = params["timeout_ms"] | (uint32_t)120000;
+    uint16_t test_idx   = params["test_idx"]   | (uint16_t)0;
+    uint8_t  phase      = params["phase"]      | (uint8_t)0;
+    uint16_t peer_idx   = 0;
 
-    int rc = sync_barrier_wait(g_active_adapter, timeout_ms);
-    if (rc != 0) {
+    int rc = sync_barrier_wait(g_active_adapter, timeout_ms,
+                               test_idx, phase, &peer_idx);
+
+    if (rc == SYNC_OK) {
+        send_ok("sync complete");
+    } else if (rc == SYNC_IDX_MISMATCH) {
+        JsonDocument doc;
+        doc["status"] = "idx_mismatch";
+        doc["message"] = "peer has different test_idx";
+        JsonObject data = doc["data"].to<JsonObject>();
+        data["my_test_idx"] = test_idx;
+        data["peer_test_idx"] = peer_idx;
+        send_json(doc);
+    } else {
         send_error("sync timeout — peer not reachable");
-        return;
     }
-
-    send_ok("sync complete");
 }
 
 static void handle_start()
@@ -281,6 +293,7 @@ static void handle_get_results()
     data["start_us"] = g_results->start_us;
     data["end_us"] = g_results->end_us;
     data["aggregate_only"] = g_results->aggregate_only;
+    data["early_aborted"] = g_results->early_aborted;
 
     JsonArray packets = data["packets"].to<JsonArray>();
     for (uint32_t i = 0; i < g_results->result_count; i++) {

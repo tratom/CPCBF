@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS experiments (
     location                  TEXT,
     test_date                 DATE,
     distance_meters           REAL,
+    duration_minutes          INTEGER,
     test_procedure            TEXT,
     environment_description   TEXT,
     interference_json         JSONB
@@ -35,6 +36,7 @@ CREATE TABLE IF NOT EXISTS test_runs (
     run_id          SERIAL PRIMARY KEY,
     experiment_id   INTEGER NOT NULL REFERENCES experiments(experiment_id),
     test_name       TEXT NOT NULL,
+    test_idx        INTEGER,
     mode            TEXT NOT NULL,
     protocol        TEXT NOT NULL,
     board           TEXT NOT NULL,
@@ -42,6 +44,7 @@ CREATE TABLE IF NOT EXISTS test_runs (
     repetitions     INTEGER NOT NULL,
     warmup          INTEGER NOT NULL,
     topology        TEXT,
+    early_aborted   BOOLEAN NOT NULL DEFAULT FALSE,
     clock_offset_us DOUBLE PRECISION,
     timestamp       DOUBLE PRECISION NOT NULL,
     valid           BOOLEAN NOT NULL DEFAULT TRUE,
@@ -172,15 +175,17 @@ def ingest_run(conn, experiment_id: int, result: dict) -> int | None:
     cur.execute(
         """
         INSERT INTO test_runs
-            (experiment_id, test_name, mode, protocol, board, payload_size,
-             repetitions, warmup, topology, clock_offset_us, timestamp)
-        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            (experiment_id, test_name, test_idx, mode, protocol, board,
+             payload_size, repetitions, warmup, topology, early_aborted,
+             clock_offset_us, timestamp)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (test_name, timestamp) DO NOTHING
         RETURNING run_id
         """,
         (
             experiment_id,
             result["test_name"],
+            result.get("test_idx"),
             result["mode"],
             result["protocol"],
             result["board"],
@@ -188,6 +193,7 @@ def ingest_run(conn, experiment_id: int, result: dict) -> int | None:
             result["repetitions"],
             result["warmup"],
             result.get("topology"),
+            bool(result.get("early_aborted", 0)),
             result.get("clock_offset_us"),
             result["timestamp"],
         ),
@@ -365,6 +371,7 @@ def ingest_directory(dir_path: Path, experiment_name: str | None = None) -> int:
         # Build the combined record
         combined = {
             "test_name": meta.get("test_name", test_key),
+            "test_idx": meta.get("test_idx"),
             "mode": mode,
             "protocol": meta.get("protocol", "wifi"),
             "board": meta.get("board", "rpi4"),
@@ -372,6 +379,7 @@ def ingest_directory(dir_path: Path, experiment_name: str | None = None) -> int:
             "repetitions": meta.get("repetitions", 0),
             "warmup": meta.get("warmup", 0),
             "topology": meta.get("topology"),
+            "early_aborted": meta.get("early_aborted", 0),
             "clock_offset_us": meta.get("clock_offset_us"),
             "timestamp": meta.get("timestamp", 0),
             "sender_agg": sender_agg,
@@ -444,6 +452,7 @@ def ingest_jsonl(jsonl_path: str | Path, experiment_name: str | None = None) -> 
 
             result = {
                 "test_name": raw["test_name"],
+                "test_idx": raw.get("test_idx"),
                 "mode": mode,
                 "protocol": raw["protocol"],
                 "board": raw["board"],
@@ -451,6 +460,7 @@ def ingest_jsonl(jsonl_path: str | Path, experiment_name: str | None = None) -> 
                 "repetitions": raw["repetitions"],
                 "warmup": raw["warmup"],
                 "topology": raw.get("topology"),
+                "early_aborted": raw.get("early_aborted", 0),
                 "clock_offset_us": raw.get("clock_offset_us"),
                 "timestamp": raw["timestamp"],
                 "sender_agg": sender_agg,
@@ -479,6 +489,7 @@ def ingest_experiment_metadata(
             location = %s,
             test_date = %s,
             distance_meters = %s,
+            duration_minutes = %s,
             test_procedure = %s,
             environment_description = %s,
             interference_json = %s
@@ -488,6 +499,7 @@ def ingest_experiment_metadata(
             metadata.get("location"),
             metadata.get("test_date"),
             metadata.get("distance_meters"),
+            metadata.get("duration_minutes"),
             metadata.get("test_procedure_description"),
             metadata.get("environmental_description"),
             json.dumps(metadata["dynamic_interference"])

@@ -12,7 +12,6 @@
  *   recv(): polls BLE.poll() checking rx_ready flag with millis() timeout
  */
 #include <Arduino.h>
-#include <WiFiNINA.h>
 #include <ArduinoBLE.h>
 
 extern "C" {
@@ -43,6 +42,9 @@ static struct {
     BLECharacteristic remote_rx; /* remote's RX char (central reads/subscribes) */
 } s_ble;
 
+/* Error detail for JSON response — set by init functions */
+static const char *s_ble_error_detail = nullptr;
+
 /* ---- Characteristic event handlers ---- */
 
 static void on_tx_written(BLEDevice central, BLECharacteristic characteristic)
@@ -71,12 +73,10 @@ static void on_rx_notify(BLEDevice peripheral, BLECharacteristic characteristic)
 
 static void ble_prepare(void)
 {
-    /* Firmware 3.x: BLE uses SPI (same as WiFi), not UART.
-     * Stop WiFi to avoid interference during BLE benchmarks,
-     * but keep SPI active — BLE needs it. */
-    WiFi.end();
+    /* BLE-only firmware: no WiFiNINA to contend for the SPI bus.
+     * NINA module SPI is exclusively used for BLE. */
     delay(100);
-    platform_log("ble: WiFi stopped, preparing BLE over SPI");
+    platform_log("ble: preparing BLE (dedicated firmware)");
 }
 
 static int ble_init_peripheral(void)
@@ -85,11 +85,15 @@ static int ble_init_peripheral(void)
     ble_prepare();
 
     if (!BLE.begin()) {
-        platform_log("ble: BLE.begin() failed");
+        platform_log("ble: BLE.begin() failed — check NINA firmware supports BLE over SPI");
+        s_ble_error_detail = "BLE.begin() failed (peripheral)";
         return ADAPTER_ERR_INIT;
     }
+    platform_log("ble: BLE.begin() ok, address: %s", BLE.address().c_str());
 
     BLE.setLocalName("CPCBF_BLE");
+    BLE.setAdvertisedService(s_ble.service);
+
     s_ble.service.addCharacteristic(s_ble.txChar);
     s_ble.service.addCharacteristic(s_ble.rxChar);
     BLE.addService(s_ble.service);
@@ -105,7 +109,8 @@ static int ble_init_peripheral(void)
     while (!BLE.central()) {
         BLE.poll();
         if ((millis() - start) > BLE_CONNECT_TIMEOUT_MS) {
-            platform_log("ble: connection timeout");
+            platform_log("ble: connection timeout — central never connected");
+            s_ble_error_detail = "peripheral timeout waiting for central";
             BLE.end();
             return ADAPTER_ERR_TIMEOUT;
         }
@@ -124,9 +129,11 @@ static int ble_init_central(void)
     ble_prepare();
 
     if (!BLE.begin()) {
-        platform_log("ble: BLE.begin() failed");
+        platform_log("ble: BLE.begin() failed — check NINA firmware supports BLE over SPI");
+        s_ble_error_detail = "BLE.begin() failed";
         return ADAPTER_ERR_INIT;
     }
+    platform_log("ble: BLE.begin() ok, address: %s", BLE.address().c_str());
 
     /* Scan for peripheral advertising our service UUID */
     platform_log("ble: scanning for service %s", BLE_SERVICE_UUID);
@@ -138,7 +145,8 @@ static int ble_init_central(void)
         peripheral = BLE.available();
         if (peripheral) break;
         if ((millis() - start) > BLE_CONNECT_TIMEOUT_MS) {
-            platform_log("ble: scan timeout");
+            platform_log("ble: scan timeout — peripheral not found");
+            s_ble_error_detail = "scan timeout";
             BLE.stopScan();
             BLE.end();
             return ADAPTER_ERR_TIMEOUT;
@@ -150,16 +158,30 @@ static int ble_init_central(void)
 
     if (!peripheral.connect()) {
         platform_log("ble: connection failed");
+        s_ble_error_detail = "connect() failed";
         BLE.end();
         return ADAPTER_ERR_INIT;
     }
 
-    platform_log("ble: connected, discovering attributes...");
-    if (!peripheral.discoverAttributes()) {
-        platform_log("ble: attribute discovery failed");
-        peripheral.disconnect();
-        BLE.end();
-        return ADAPTER_ERR_INIT;
+    platform_log("ble: connected, flushing HCI events...");
+
+    /* Flush pending HCI events — the connection complete event must be
+     * fully processed before ATT operations can work */
+    for (int i = 0; i < 20; i++) {
+        BLE.poll();
+        delay(100);
+    }
+
+    platform_log("ble: discovering service %s", BLE_SERVICE_UUID);
+    if (!peripheral.discoverService(BLE_SERVICE_UUID)) {
+        platform_log("ble: targeted discovery failed, trying full discovery...");
+        if (!peripheral.discoverAttributes()) {
+            platform_log("ble: full attribute discovery also failed");
+            s_ble_error_detail = "discoverAttributes() failed";
+            peripheral.disconnect();
+            BLE.end();
+            return ADAPTER_ERR_INIT;
+        }
     }
 
     /* Find TX and RX characteristics on the remote peripheral */
@@ -167,7 +189,9 @@ static int ble_init_central(void)
     s_ble.remote_rx = peripheral.characteristic(BLE_RX_CHAR_UUID);
 
     if (!s_ble.remote_tx || !s_ble.remote_rx) {
-        platform_log("ble: characteristics not found");
+        platform_log("ble: chars not found tx=%d rx=%d",
+                     (int)(bool)s_ble.remote_tx, (int)(bool)s_ble.remote_rx);
+        s_ble_error_detail = "characteristics not found";
         peripheral.disconnect();
         BLE.end();
         return ADAPTER_ERR_INIT;
@@ -178,6 +202,7 @@ static int ble_init_central(void)
         s_ble.remote_rx.setEventHandler(BLEUpdated, on_rx_notify);
         if (!s_ble.remote_rx.subscribe()) {
             platform_log("ble: subscribe failed");
+            s_ble_error_detail = "subscribe() failed";
             peripheral.disconnect();
             BLE.end();
             return ADAPTER_ERR_INIT;
@@ -199,6 +224,7 @@ static int ble_nina_init(protocol_adapter_t *self, const adapter_config_t *cfg)
     s_ble.initialized = false;
     s_ble.rx_ready = false;
     s_ble.rx_len = 0;
+    s_ble_error_detail = nullptr;
 
     int rc;
     if (cfg->role == ROLE_RECEIVER)
@@ -209,6 +235,12 @@ static int ble_nina_init(protocol_adapter_t *self, const adapter_config_t *cfg)
     if (rc == ADAPTER_OK)
         s_ble.initialized = true;
     return rc;
+}
+
+/* Expose last error detail for main.cpp to include in JSON response */
+extern "C" const char *ble_nina_last_error(void)
+{
+    return s_ble_error_detail ? s_ble_error_detail : "unknown";
 }
 
 static int ble_nina_send(protocol_adapter_t *self, const uint8_t *data, size_t len)

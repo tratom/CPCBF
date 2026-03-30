@@ -30,6 +30,7 @@ static void run_ping_pong_sender(protocol_adapter_t *adapter,
     uint8_t tx_buf[BENCH_MAX_PAYLOAD + BENCH_OVERHEAD];
     uint8_t rx_buf[BENCH_MAX_PAYLOAD + BENCH_OVERHEAD];
     bench_packet_t pkt;
+    uint32_t consecutive_timeouts = 0;
 
     memset(&pkt, 0, sizeof(pkt));
     pkt.msg_type = MSG_PING;
@@ -62,6 +63,13 @@ static void run_ping_pong_sender(protocol_adapter_t *adapter,
             pr->lost = 1;
             res->packets_lost++;
             res->result_count++;
+            consecutive_timeouts++;
+            if (consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
+                platform_log("pp_tx: %u consecutive send failures, aborting",
+                             consecutive_timeouts);
+                res->early_aborted = 1;
+                break;
+            }
             continue;
         }
 
@@ -74,6 +82,13 @@ static void run_ping_pong_sender(protocol_adapter_t *adapter,
             pr->lost = 1;
             res->packets_lost++;
             res->result_count++;
+            consecutive_timeouts++;
+            if (consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
+                platform_log("pp_tx: %u consecutive timeouts, aborting",
+                             consecutive_timeouts);
+                res->early_aborted = 1;
+                break;
+            }
             continue;
         }
 
@@ -94,6 +109,7 @@ static void run_ping_pong_sender(protocol_adapter_t *adapter,
         pr->rx_us = rx_us;
         pr->rtt_us = rx_us - tx_us;
         res->packets_received++;
+        consecutive_timeouts = 0;
 
         res->result_count++;
 
@@ -111,6 +127,7 @@ static void run_ping_pong_receiver(protocol_adapter_t *adapter,
     uint32_t total = cfg->warmup + cfg->repetitions;
     uint8_t rx_buf[BENCH_MAX_PAYLOAD + BENCH_OVERHEAD];
     uint8_t tx_buf[BENCH_MAX_PAYLOAD + BENCH_OVERHEAD];
+    uint32_t consecutive_timeouts = 0;
 
     for (uint32_t i = 0; i < total; i++) {
         size_t rx_len = 0;
@@ -126,6 +143,13 @@ static void run_ping_pong_receiver(protocol_adapter_t *adapter,
             pr->lost = 1;
             res->packets_lost++;
             res->result_count++;
+            consecutive_timeouts++;
+            if (consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
+                platform_log("pp_rx: %u consecutive timeouts, aborting",
+                             consecutive_timeouts);
+                res->early_aborted = 1;
+                break;
+            }
             continue;
         }
 
@@ -144,6 +168,7 @@ static void run_ping_pong_receiver(protocol_adapter_t *adapter,
         }
 
         res->packets_received++;
+        consecutive_timeouts = 0;
 
         /* Build and send PONG */
         pkt.msg_type = MSG_PONG;
@@ -211,8 +236,6 @@ static void run_flood_sender(protocol_adapter_t *adapter,
 
 /* ---- Flood receiver ---- */
 
-#define FLOOD_MAX_CONSECUTIVE_TIMEOUTS 30
-
 static void run_flood_receiver(protocol_adapter_t *adapter,
                                const test_config_t *cfg,
                                test_results_t *res)
@@ -237,9 +260,10 @@ static void run_flood_receiver(protocol_adapter_t *adapter,
             consecutive_timeouts++;
             /* After receiving at least one packet, stop on consecutive timeouts */
             if (res->packets_received > 0 &&
-                consecutive_timeouts >= FLOOD_MAX_CONSECUTIVE_TIMEOUTS) {
+                consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
                 platform_log("flood_rx: %u consecutive timeouts after %u packets, stopping",
                              consecutive_timeouts, res->packets_received);
+                res->early_aborted = 1;
                 break;
             }
             continue;  /* Don't record timeout slots — we count loss from seq gaps */
@@ -302,6 +326,7 @@ static void run_rssi_sampler(protocol_adapter_t *adapter,
     uint32_t total = cfg->warmup + cfg->repetitions;
     uint32_t interval_ms = cfg->inter_packet_us / 1000;
     if (interval_ms == 0) interval_ms = 100;  /* default 100ms between samples */
+    uint32_t consecutive_failures = 0;
 
     for (uint32_t i = 0; i < total; i++) {
         packet_result_t *pr = &res->results[res->result_count];
@@ -313,9 +338,18 @@ static void run_rssi_sampler(protocol_adapter_t *adapter,
         if (adapter->get_rssi(adapter, &rssi) == ADAPTER_OK) {
             pr->rssi = rssi;
             res->packets_received++;
+            consecutive_failures = 0;
         } else {
             pr->lost = 1;
             res->packets_lost++;
+            consecutive_failures++;
+            if (consecutive_failures >= MAX_CONSECUTIVE_TIMEOUTS) {
+                platform_log("rssi: %u consecutive failures, aborting",
+                             consecutive_failures);
+                res->result_count++;
+                res->early_aborted = 1;
+                break;
+            }
         }
         res->result_count++;
 
@@ -393,6 +427,7 @@ char *test_results_to_json(const test_results_t *results,
         "  \"start_us\": %u,\n"
         "  \"end_us\": %u,\n"
         "  \"aggregate_only\": %u,\n"
+        "  \"early_aborted\": %u,\n"
         "  \"packets\": [\n",
         cfg->mode == TEST_MODE_PING_PONG ? "ping_pong" :
         cfg->mode == TEST_MODE_FLOOD     ? "flood"     : "rssi",
@@ -406,7 +441,8 @@ char *test_results_to_json(const test_results_t *results,
         results->crc_errors,
         results->start_us,
         results->end_us,
-        results->aggregate_only);
+        results->aggregate_only,
+        results->early_aborted);
 
     for (uint32_t i = 0; i < results->result_count; i++) {
         const packet_result_t *p = &results->results[i];

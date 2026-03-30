@@ -1,10 +1,14 @@
 /*
  * CPCBF — Arduino MKR WiFi 1010 Platform HAL
- * Implements platform_hal.h for SAMD21 + WiFiNINA.
+ * Implements platform_hal.h for SAMD21.
  */
 #include <Arduino.h>
+#ifdef CPCBF_PROTOCOL_WIFI
 #include <WiFiNINA.h>
+#endif
+#ifdef CPCBF_PROTOCOL_BLE
 #include <ArduinoBLE.h>
+#endif
 #include <stdarg.h>
 
 extern "C" {
@@ -43,10 +47,14 @@ extern "C" void platform_sleep_us(uint32_t us)
 
 extern "C" int platform_radio_disable(const char *subsystem)
 {
+#ifdef CPCBF_PROTOCOL_WIFI
     if (strcmp(subsystem, "wifi") == 0 || strcmp(subsystem, "all") == 0)
         WiFi.end();
+#endif
+#ifdef CPCBF_PROTOCOL_BLE
     if (strcmp(subsystem, "bluetooth") == 0 || strcmp(subsystem, "all") == 0)
         BLE.end();
+#endif
     return 0;
 }
 
@@ -59,10 +67,14 @@ extern "C" int platform_radio_enable(const char *subsystem)
 
 extern "C" int platform_radio_is_active(const char *subsystem)
 {
+#ifdef CPCBF_PROTOCOL_WIFI
     if (strcmp(subsystem, "wifi") == 0)
         return (WiFi.status() != WL_NO_MODULE && WiFi.status() != WL_NO_SHIELD) ? 1 : 0;
+#endif
+#ifdef CPCBF_PROTOCOL_BLE
     if (strcmp(subsystem, "bluetooth") == 0)
         return BLE.connected() ? 1 : 0;
+#endif
     return 0;
 }
 

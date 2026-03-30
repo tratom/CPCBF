@@ -20,6 +20,7 @@ class RunStats:
     mode: str
     protocol: str
     payload_size: int
+    early_aborted: bool
     packets_measured: int
     rtt_mean_us: float | None
     rtt_median_us: float | None
@@ -52,6 +53,7 @@ def compute_run_stats(conn, run_id: int) -> RunStats:
     cur = conn.cursor()
     cur.execute(
         """SELECT r.test_name, r.mode, r.payload_size, r.repetitions, r.protocol,
+                  r.early_aborted,
                   f.sender_measured_count, f.sender_lost, f.sender_crc_errors,
                   f.receiver_measured_count, f.receiver_lost, f.receiver_crc_errors,
                   f.receiver_start_us, f.receiver_end_us
@@ -61,7 +63,7 @@ def compute_run_stats(conn, run_id: int) -> RunStats:
         (run_id,),
     )
     meta = cur.fetchone()
-    (test_name, mode, payload_size, repetitions, protocol,
+    (test_name, mode, payload_size, repetitions, protocol, early_aborted,
      sender_measured, sender_lost, sender_crc_errors,
      receiver_measured, receiver_lost, receiver_crc_errors,
      rx_start_us, rx_end_us) = meta
@@ -75,7 +77,13 @@ def compute_run_stats(conn, run_id: int) -> RunStats:
         packet_loss_pct = ((packets_sent - packets_rcv) / packets_sent * 100) if packets_sent > 0 else 0.0
         crc_error_pct = (r_crc_errs / packets_rcv * 100) if packets_rcv > 0 else 0.0
 
-        duration_us = (rx_end_us - rx_start_us) if (rx_start_us and rx_end_us) else 0
+        if rx_start_us and rx_end_us:
+            duration_us = rx_end_us - rx_start_us
+            if duration_us < 0:
+                # 32-bit microsecond timer wraparound (2^32 ≈ 4295s)
+                duration_us += 2**32
+        else:
+            duration_us = 0
         throughput = _compute_flood_throughput(protocol, payload_size, packets_rcv, duration_us)
 
         return RunStats(
@@ -84,6 +92,7 @@ def compute_run_stats(conn, run_id: int) -> RunStats:
             mode=mode,
             protocol=protocol,
             payload_size=payload_size,
+            early_aborted=bool(early_aborted),
             packets_measured=packets_rcv,
             rtt_mean_us=None, rtt_median_us=None, rtt_std_us=None,
             rtt_p95_us=None, rtt_p99_us=None,
@@ -148,6 +157,7 @@ def compute_run_stats(conn, run_id: int) -> RunStats:
         mode=mode,
         protocol=protocol,
         payload_size=payload_size,
+        early_aborted=bool(early_aborted),
         packets_measured=len(valid),
         rtt_mean_us=rtt_mean,
         rtt_median_us=rtt_median,

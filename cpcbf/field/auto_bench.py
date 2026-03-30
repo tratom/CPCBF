@@ -41,6 +41,7 @@ def send_cmd(proc, cmd_dict, timeout=120):
 
 
 MAX_RETRIES = 3
+SETUP_FAIL_PACING_S = 30  # sleep after link setup failure to stay in step with peer
 
 
 def _start_proc(role_cfg):
@@ -143,100 +144,163 @@ def _build_params(role_cfg, plan_global, test, payload_size):
     return common
 
 
-def run_test_plan(role_cfg, plan, label_prefix, round_num=1):
-    """Run one YAML plan through the agent."""
+def flatten_schedule(plan, rounds):
+    """Build an ordered list of (round, test, payload_size) with test_idx.
+
+    Both sides compute the same list from the same YAML plan in the same
+    order, so test_idx is deterministic and identical on sender and receiver.
+    """
+    schedule = []
+    idx = 0
+    for r in range(1, rounds + 1):
+        for test in plan["tests"]:
+            for payload_size in test["payload_sizes"]:
+                schedule.append({
+                    "round": r,
+                    "test": test,
+                    "payload_size": payload_size,
+                    "test_idx": idx,
+                })
+                idx += 1
+    return schedule
+
+
+def run_test_plan(role_cfg, plan, label_prefix, rounds=1):
+    """Run one YAML plan through the agent with indexed SYNC."""
     g = plan["global"]
-    for test in plan["tests"]:
-        for payload_size in test["payload_sizes"]:
-            role_str = role_cfg["role"]
-            protocol = test.get("protocol", "wifi")
-            params = _build_params(role_cfg, g, test, payload_size)
-            setup_cmd = "BLE_SETUP" if protocol == "ble" else "WIFI_SETUP"
+    schedule = flatten_schedule(plan, rounds)
 
-            # Retry loop — on link/sync failure, both sides retry the
-            # same test with a fresh agent so they stay aligned.
-            success = False
-            for attempt in range(1, MAX_RETRIES + 1):
-                proc = _start_proc(role_cfg)
-                try:
-                    # CONFIGURE
-                    send_cmd(proc, {"command": "CONFIGURE", "params": params})
+    i = 0
+    while i < len(schedule):
+        entry = schedule[i]
+        test = entry["test"]
+        payload_size = entry["payload_size"]
+        test_idx = entry["test_idx"]
+        round_num = entry["round"]
 
-                    # Link setup
-                    setup_resp = send_cmd(proc, {"command": setup_cmd}, timeout=120)
-                    if setup_resp.get("status") != "ok":
-                        print(f"[attempt {attempt}/{MAX_RETRIES}] "
-                              f"{setup_cmd} failed: {setup_resp.get('message', '?')}")
-                        continue
+        role_str = role_cfg["role"]
+        protocol = test.get("protocol", "wifi")
+        params = _build_params(role_cfg, g, test, payload_size)
+        setup_cmd = "BLE_SETUP" if protocol == "ble" else "WIFI_SETUP"
 
-                    # Pre-test SYNC
-                    sync_resp = send_cmd(
-                        proc,
-                        {"command": "SYNC", "params": {"timeout_ms": 120000}},
-                        timeout=180,
-                    )
-                    if sync_resp.get("status") != "ok":
-                        print(f"[attempt {attempt}/{MAX_RETRIES}] "
-                              f"SYNC failed: {sync_resp.get('message', '?')}")
-                        continue
+        success = False
+        idx_skipped = False
+        sync_resp = {}
 
-                    # START (blocking) — dynamic timeout based on test params
-                    max_test_s = (params["repetitions"] + params["warmup"]) * (params["timeout_ms"] / 1000)
-                    if params["inter_packet_us"] > 0:
-                        max_test_s += params["repetitions"] * (params["inter_packet_us"] / 1_000_000)
-                    start_timeout = max(300, int(max_test_s) + 60)
-                    send_cmd(proc, {"command": "START"}, timeout=start_timeout)
+        for attempt in range(1, MAX_RETRIES + 1):
+            proc = _start_proc(role_cfg)
+            try:
+                # CONFIGURE
+                send_cmd(proc, {"command": "CONFIGURE", "params": params})
 
-                    # GET_RESULTS
-                    resp = send_cmd(proc, {"command": "GET_RESULTS"})
+                # Link setup
+                setup_resp = send_cmd(proc, {"command": setup_cmd}, timeout=120)
+                if setup_resp.get("status") != "ok":
+                    print(f"[idx={test_idx} attempt {attempt}/{MAX_RETRIES}] "
+                          f"{setup_cmd} failed: {setup_resp.get('message', '?')}")
+                    time.sleep(SETUP_FAIL_PACING_S)
+                    continue
 
-                    # Post-test SYNC — wait for peer to also finish
-                    send_cmd(
-                        proc,
-                        {"command": "SYNC", "params": {"timeout_ms": 120000}},
-                        timeout=180,
-                    )
+                # Pre-test SYNC with test_idx + phase=0
+                sync_resp = send_cmd(
+                    proc,
+                    {"command": "SYNC", "params": {
+                        "timeout_ms": 120000,
+                        "test_idx": test_idx,
+                        "phase": 0,
+                    }},
+                    timeout=180,
+                )
 
-                    # Save results
-                    test_name = (f"{label_prefix}_r{round_num:02d}"
-                                 f"_{test['name']}_{payload_size}B")
-                    result_file = os.path.join(
-                        OUTPUT_DIR, f"{test_name}_{role_str}.jsonl"
-                    )
-                    record = {
-                        "test_name": test_name,
-                        "mode": test["mode"],
-                        "protocol": protocol,
-                        "board": test.get("board", role_cfg.get("board_type", "rpi4")),
-                        "payload_size": payload_size,
-                        "repetitions": params["repetitions"],
-                        "warmup": params["warmup"],
-                        "topology": params["topology"],
-                        role_str: resp.get("data", {}),
-                        "clock_offset_us": None,
-                        "timestamp": time.time(),
-                    }
-                    with open(result_file, "w") as f:
-                        json.dump(record, f)
-                        f.write("\n")
+                if sync_resp.get("status") == "idx_mismatch":
+                    peer_idx = sync_resp.get("data", {}).get("peer_test_idx", test_idx)
+                    print(f"[idx={test_idx}] idx mismatch, peer at {peer_idx} — skipping forward")
+                    skip_target = None
+                    for j in range(i + 1, len(schedule)):
+                        if schedule[j]["test_idx"] == peer_idx:
+                            skip_target = j
+                            break
+                    if skip_target is not None:
+                        i = skip_target - 1  # -1 to compensate for i += 1 at loop bottom
+                    else:
+                        print(f"[idx={test_idx}] peer_idx {peer_idx} beyond schedule, done")
+                        i = len(schedule)
+                    idx_skipped = True
+                    break
 
-                    success = True
-                    break  # test succeeded, move to next payload/test
+                if sync_resp.get("status") != "ok":
+                    print(f"[idx={test_idx} attempt {attempt}/{MAX_RETRIES}] "
+                          f"SYNC failed: {sync_resp.get('message', '?')}")
+                    continue
 
-                except Exception as e:
-                    print(f"[attempt {attempt}/{MAX_RETRIES}] "
-                          f"exception: {e}")
+                # START (blocking) — dynamic timeout based on test params
+                max_test_s = ((params["repetitions"] + params["warmup"])
+                              * (params["timeout_ms"] / 1000))
+                if params["inter_packet_us"] > 0:
+                    max_test_s += params["repetitions"] * (params["inter_packet_us"] / 1_000_000)
+                start_timeout = max(300, int(max_test_s) + 60)
+                send_cmd(proc, {"command": "START"}, timeout=start_timeout)
 
-                finally:
-                    _kill_agent(proc, protocol,
-                               board_type=role_cfg.get("board_type", "rpi4"))
+                # GET_RESULTS
+                resp = send_cmd(proc, {"command": "GET_RESULTS"})
 
-            if not success:
-                print(f"FAILED after {MAX_RETRIES} attempts: "
-                      f"{test['name']} payload={payload_size}")
+                # Post-test SYNC — dynamic timeout for early abort drain
+                post_sync_timeout = max(120000, 50 * params["timeout_ms"] + 30000)
+                send_cmd(
+                    proc,
+                    {"command": "SYNC", "params": {
+                        "timeout_ms": post_sync_timeout,
+                        "test_idx": test_idx,
+                        "phase": 1,
+                    }},
+                    timeout=int(post_sync_timeout / 1000) + 60,
+                )
 
-            # Cooldown between payload sizes
-            time.sleep(g.get("cooldown_s", test.get("cooldown_s", 5)))
+                # Save results
+                test_name = (f"{label_prefix}_r{round_num:02d}"
+                             f"_{test['name']}_{payload_size}B")
+                result_file = os.path.join(
+                    OUTPUT_DIR, f"{test_name}_{role_str}.jsonl"
+                )
+                result_data = resp.get("data", {})
+                record = {
+                    "test_name": test_name,
+                    "test_idx": test_idx,
+                    "mode": test["mode"],
+                    "protocol": protocol,
+                    "board": test.get("board", role_cfg.get("board_type", "rpi4")),
+                    "payload_size": payload_size,
+                    "repetitions": params["repetitions"],
+                    "warmup": params["warmup"],
+                    "topology": params["topology"],
+                    "early_aborted": result_data.get("early_aborted", 0),
+                    role_str: result_data,
+                    "clock_offset_us": None,
+                    "timestamp": time.time(),
+                }
+                with open(result_file, "w") as f:
+                    json.dump(record, f)
+                    f.write("\n")
+
+                success = True
+                break  # test succeeded, move to next
+
+            except Exception as e:
+                print(f"[idx={test_idx} attempt {attempt}/{MAX_RETRIES}] "
+                      f"exception: {e}")
+
+            finally:
+                _kill_agent(proc, protocol,
+                           board_type=role_cfg.get("board_type", "rpi4"))
+
+        if not success and not idx_skipped:
+            print(f"FAILED after {MAX_RETRIES} attempts: "
+                  f"{test['name']} payload={payload_size} test_idx={test_idx}")
+
+        i += 1
+
+        # Cooldown between tests
+        time.sleep(g.get("cooldown_s", test.get("cooldown_s", 5)))
 
 
 def restore_network():
@@ -258,16 +322,14 @@ def main():
 
         label = role_cfg.get("label", datetime.datetime.now().strftime("%Y%m%d_%H%M"))
 
-        # Run all YAML plans in the plans directory, repeated for N rounds
         rounds = role_cfg.get("rounds", 1)
         plans_subdir = role_cfg.get("plans_subdir", "")
         plans_dir = os.path.join(PLANS_DIR, plans_subdir)
         plan_files = sorted(glob.glob(os.path.join(plans_dir, "**/*.yaml"), recursive=True))
-        for r in range(1, rounds + 1):
-            for plan_path in plan_files:
-                with open(plan_path) as f:
-                    plan = yaml.safe_load(f)
-                run_test_plan(role_cfg, plan, label, round_num=r)
+        for plan_path in plan_files:
+            with open(plan_path) as f:
+                plan = yaml.safe_load(f)
+            run_test_plan(role_cfg, plan, label, rounds=rounds)
     finally:
         if not role_cfg.get("board_type", "rpi4").startswith("mkr_"):
             restore_network()

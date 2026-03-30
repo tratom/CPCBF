@@ -9,6 +9,9 @@
 #include <stddef.h>
 #include "protocol_adapter.h"
 
+/* Early abort: break out of test loop after this many consecutive timeouts */
+#define MAX_CONSECUTIVE_TIMEOUTS 50
+
 /* Test modes */
 typedef enum {
     TEST_MODE_PING_PONG = 0,
@@ -51,6 +54,7 @@ typedef struct {
     uint32_t start_us;        /* timestamp of first packet */
     uint32_t end_us;          /* timestamp of last packet */
     uint8_t  aggregate_only;  /* 1 = no per-packet results stored */
+    uint8_t  early_aborted;   /* 1 = test was cut short by consecutive timeouts */
 #if defined(__cplusplus)
     packet_result_t results[1]; /* C++ compat — allocated via calloc with extra space */
 #else

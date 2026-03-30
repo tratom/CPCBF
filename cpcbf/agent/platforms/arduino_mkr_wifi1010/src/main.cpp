@@ -6,8 +6,12 @@
  */
 #include <Arduino.h>
 #include <ArduinoJson.h>
+#ifdef CPCBF_PROTOCOL_WIFI
 #include <WiFiNINA.h>
+#endif
+#ifdef CPCBF_PROTOCOL_BLE
 #include <ArduinoBLE.h>
+#endif
 #include "config.h"
 
 extern "C" {
@@ -19,8 +23,13 @@ extern "C" {
 }
 
 /* External adapters */
+#ifdef CPCBF_PROTOCOL_WIFI
 extern "C" protocol_adapter_t wifi_nina_adapter;
+#endif
+#ifdef CPCBF_PROTOCOL_BLE
 extern "C" protocol_adapter_t ble_nina_adapter;
+extern "C" const char *ble_nina_last_error(void);
+#endif
 
 /* Agent state */
 static adapter_config_t g_adapter_cfg;
@@ -104,12 +113,12 @@ static void handle_configure(JsonObject params)
         g_adapter_cfg.topology = TOPO_P2P;
     }
 
-    /* Protocol/adapter selection */
-    if (params["protocol"].is<const char *>() &&
-        strcmp(params["protocol"].as<const char *>(), "ble") == 0)
-        g_active_adapter = &ble_nina_adapter;
-    else
-        g_active_adapter = &wifi_nina_adapter;
+    /* Protocol/adapter selection (compile-time) */
+#ifdef CPCBF_PROTOCOL_BLE
+    g_active_adapter = &ble_nina_adapter;
+#else
+    g_active_adapter = &wifi_nina_adapter;
+#endif
 
     /* Test config */
     memset(&g_test_cfg, 0, sizeof(g_test_cfg));
@@ -144,10 +153,14 @@ static void handle_radio_disable(JsonObject params)
     if (params["subsystem"].is<const char *>())
         subsystem = params["subsystem"].as<const char *>();
 
+#ifdef CPCBF_PROTOCOL_WIFI
     if (strcmp(subsystem, "wifi") == 0 || strcmp(subsystem, "all") == 0)
         WiFi.end();
+#endif
+#ifdef CPCBF_PROTOCOL_BLE
     if (strcmp(subsystem, "bluetooth") == 0 || strcmp(subsystem, "all") == 0)
         BLE.end();
+#endif
 
     send_ok("radio disabled");
 }
@@ -158,11 +171,14 @@ static void handle_radio_status()
     doc["status"] = "ok";
     doc["message"] = "radio status";
     JsonObject data = doc["data"].to<JsonObject>();
-    /* Report based on which adapter is currently active */
-    bool ble_active = (g_active_adapter == &ble_nina_adapter) && g_adapter_ready;
-    bool wifi_active = (g_active_adapter == &wifi_nina_adapter) && g_adapter_ready;
-    data["wifi_active"] = wifi_active;
-    data["bluetooth_active"] = ble_active;
+#ifdef CPCBF_PROTOCOL_WIFI
+    data["wifi_active"] = g_adapter_ready ? true : false;
+    data["bluetooth_active"] = false;
+#endif
+#ifdef CPCBF_PROTOCOL_BLE
+    data["wifi_active"] = false;
+    data["bluetooth_active"] = g_adapter_ready ? true : false;
+#endif
     send_json(doc);
 }
 
@@ -180,7 +196,13 @@ static void handle_link_setup()
 
     int rc = g_active_adapter->init(g_active_adapter, &g_adapter_cfg);
     if (rc != ADAPTER_OK) {
+#ifdef CPCBF_PROTOCOL_BLE
+        char msg[80];
+        snprintf(msg, sizeof(msg), "BLE init failed: %s", ble_nina_last_error());
+        send_error(msg);
+#else
         send_error("adapter init failed");
+#endif
         return;
     }
 
@@ -196,12 +218,26 @@ static void handle_sync(JsonObject params)
     }
 
     uint32_t timeout_ms = params["timeout_ms"] | (uint32_t)120000;
-    int rc = sync_barrier_wait(g_active_adapter, timeout_ms);
-    if (rc != 0) {
+    uint16_t test_idx   = params["test_idx"]   | (uint16_t)0;
+    uint8_t  phase      = params["phase"]      | (uint8_t)0;
+    uint16_t peer_idx   = 0;
+
+    int rc = sync_barrier_wait(g_active_adapter, timeout_ms,
+                               test_idx, phase, &peer_idx);
+
+    if (rc == SYNC_OK) {
+        send_ok("sync complete");
+    } else if (rc == SYNC_IDX_MISMATCH) {
+        JsonDocument doc;
+        doc["status"] = "idx_mismatch";
+        doc["message"] = "peer has different test_idx";
+        JsonObject data = doc["data"].to<JsonObject>();
+        data["my_test_idx"] = test_idx;
+        data["peer_test_idx"] = peer_idx;
+        send_json(doc);
+    } else {
         send_error("sync timeout — peer not reachable");
-        return;
     }
-    send_ok("sync complete");
 }
 
 static void handle_start()
@@ -217,7 +253,12 @@ static void handle_start()
     }
 
     if (!g_adapter_ready) {
+#ifdef CPCBF_PROTOCOL_WIFI
         if (!g_active_adapter) g_active_adapter = &wifi_nina_adapter;
+#endif
+#ifdef CPCBF_PROTOCOL_BLE
+        if (!g_active_adapter) g_active_adapter = &ble_nina_adapter;
+#endif
         int rc = g_active_adapter->init(g_active_adapter, &g_adapter_cfg);
         if (rc != ADAPTER_OK) {
             send_error("adapter init failed");
@@ -267,6 +308,7 @@ static void handle_get_results()
     Serial.print("\"start_us\":"); Serial.print(g_results->start_us); Serial.print(",");
     Serial.print("\"end_us\":"); Serial.print(g_results->end_us); Serial.print(",");
     Serial.print("\"aggregate_only\":"); Serial.print(g_results->aggregate_only); Serial.print(",");
+    Serial.print("\"early_aborted\":"); Serial.print(g_results->early_aborted); Serial.print(",");
     Serial.print("\"packets\":[");
 
     for (uint32_t i = 0; i < g_results->result_count; i++) {
