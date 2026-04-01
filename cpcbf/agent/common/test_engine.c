@@ -106,6 +106,22 @@ static void run_ping_pong_sender(protocol_adapter_t *adapter,
             continue;
         }
 
+        /* Verify seq matches — discard stale PONGs from previous iterations */
+        if (rpkt.seq_num != pkt.seq_num) {
+            platform_log("pp_tx: seq mismatch, expected %u got %u — draining",
+                         pkt.seq_num, rpkt.seq_num);
+            /* Drain any additional stale packets from the buffer */
+            size_t drain_len = 0;
+            while (adapter->recv(adapter, rx_buf, sizeof(rx_buf),
+                                 &drain_len, 0) == ADAPTER_OK) {
+                drain_len = 0;
+            }
+            pr->lost = 1;
+            res->packets_lost++;
+            res->result_count++;
+            continue;
+        }
+
         pr->rx_us = rx_us;
         pr->rtt_us = rx_us - tx_us;
         res->packets_received++;
@@ -337,6 +353,7 @@ static void run_rssi_sampler(protocol_adapter_t *adapter,
         int rssi;
         if (adapter->get_rssi(adapter, &rssi) == ADAPTER_OK) {
             pr->rssi = rssi;
+            pr->crc_ok = 1;  /* no payload to validate — mark as OK */
             res->packets_received++;
             consecutive_failures = 0;
         } else {

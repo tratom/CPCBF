@@ -28,6 +28,7 @@ class RunStats:
     mode: str
     protocol: str
     payload_size: int
+    early_aborted: bool
     packets_measured: int
     rtt_mean_us: float | None
     rtt_median_us: float | None
@@ -50,6 +51,7 @@ def compute_stats_from_record(rec: dict) -> RunStats:
     mode = rec.get("mode", "unknown")
     protocol = rec.get("protocol", "wifi")
     payload_size = rec.get("payload_size", 0)
+    early_aborted = bool(rec.get("early_aborted", 0))
 
     # Source selection: ping_pong → sender (has RTT), rssi → receiver, flood → receiver
     if mode == "ping_pong":
@@ -86,6 +88,7 @@ def compute_stats_from_record(rec: dict) -> RunStats:
             mode=mode,
             protocol=protocol,
             payload_size=payload_size,
+            early_aborted=early_aborted,
             packets_measured=packets_rcv,
             rtt_mean_us=None, rtt_median_us=None, rtt_std_us=None,
             rtt_p95_us=None, rtt_p99_us=None,
@@ -154,6 +157,7 @@ def compute_stats_from_record(rec: dict) -> RunStats:
         mode=mode,
         protocol=protocol,
         payload_size=payload_size,
+        early_aborted=early_aborted,
         packets_measured=len(valid),
         rtt_mean_us=rtt_mean,
         rtt_median_us=rtt_median,
