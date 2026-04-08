@@ -157,6 +157,13 @@ class Orchestrator:
             test.mode.value,
         )
 
+        # 0. Clean up any stale state from previous runs
+        for hid in host_ids:
+            try:
+                manager.send(hid, {"command": "STOP"}, timeout=5.0)
+            except Exception:
+                pass  # board may not have anything to stop
+
         # 1. Radio isolation preflight
         isolation = RadioIsolation(manager, test.protocol)
         isolation.run_preflight()
@@ -260,9 +267,17 @@ class Orchestrator:
             logger.error("Receiver test failed: %s", receiver_resp)
             return None
 
-        # 5. Collect results
-        sender_results = manager.send(sender_id, {"command": "GET_RESULTS"})
-        receiver_results = manager.send(receiver_id, {"command": "GET_RESULTS"})
+        # 5. Collect results in parallel (minimise idle time on boards —
+        #    SAMD21 USB CDC can stall if the board sits idle too long
+        #    between the test end and GET_RESULTS)
+        def get_results(host_id: str) -> dict:
+            return manager.send(host_id, {"command": "GET_RESULTS"}, timeout=120.0)
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            sf = pool.submit(get_results, sender_id)
+            rf = pool.submit(get_results, receiver_id)
+            sender_results = sf.result()
+            receiver_results = rf.result()
 
         combined = {
             "test_name": test.name,
@@ -310,6 +325,12 @@ class Orchestrator:
                             test.name,
                             payload_size,
                         )
+                        # Clean up agents after failure
+                        for hid in manager.host_ids:
+                            try:
+                                manager.send(hid, {"command": "STOP"}, timeout=5.0)
+                            except Exception:
+                                pass
 
                     # Cooldown between tests
                     logger.info("Cooling down for %ds...", test.cooldown_s)

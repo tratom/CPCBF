@@ -13,6 +13,11 @@
       "type": "string",
       "description": "Human-readable location name"
     },
+    "environment_type": {
+      "type": "string",
+      "enum": ["underground_garage", "office", "corridor", "stairwell", "elevator_shaft", "server_room"],
+      "description": "Type of physical environment where the test was conducted"
+    },
     "test_date": {
       "type": "string",
       "format": "date",

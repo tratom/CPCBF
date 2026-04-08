@@ -5,7 +5,11 @@ __pycache__/
 *.pyc
 
 # C build artifacts
+build/
 cpcbf/agent/build/
+
+# PlatformIO
+.pio/
 
 # Config (local credentials)
 *.conf

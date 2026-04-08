@@ -267,9 +267,10 @@ static void handle_start()
         g_adapter_ready = 1;
     }
 
-    platform_log("starting test: mode=%d role=%d payload=%u reps=%u",
+    platform_log("starting test: mode=%d role=%d payload=%lu reps=%lu",
                  g_test_cfg.mode, g_test_cfg.role,
-                 g_test_cfg.payload_size, g_test_cfg.repetitions);
+                 (unsigned long)g_test_cfg.payload_size,
+                 (unsigned long)g_test_cfg.repetitions);
 
     g_results = test_engine_run(g_active_adapter, &g_test_cfg);
 
@@ -289,8 +290,14 @@ static void handle_get_results()
     /*
      * Stream results field-by-field to avoid building a huge JSON string
      * in RAM. We print the outer envelope and then each packet entry
-     * directly to Serial.
+     * directly to Serial, flushing periodically to prevent USB CDC stalls
+     * on the SAMD21.
      */
+    uint32_t count = g_results->result_count;
+    if (count > MAX_RESULTS) count = MAX_RESULTS;  /* safety cap */
+
+    platform_log("GET_RESULTS: streaming %lu results", (unsigned long)count);
+
     const char *mode_str = g_test_cfg.mode == TEST_MODE_PING_PONG ? "ping_pong" :
                            g_test_cfg.mode == TEST_MODE_FLOOD     ? "flood"     : "rssi";
     const char *role_str = g_test_cfg.role == ROLE_SENDER ? "sender" : "receiver";
@@ -311,22 +318,33 @@ static void handle_get_results()
     Serial.print("\"early_aborted\":"); Serial.print(g_results->early_aborted); Serial.print(",");
     Serial.print("\"packets\":[");
 
-    for (uint32_t i = 0; i < g_results->result_count; i++) {
+    char buf[160];
+    for (uint32_t i = 0; i < count; i++) {
         const packet_result_t *p = &g_results->results[i];
-        if (i > 0) Serial.print(",");
-        Serial.print("{\"seq\":"); Serial.print(p->seq);
-        Serial.print(",\"tx_us\":"); Serial.print(p->tx_us);
-        Serial.print(",\"rx_us\":"); Serial.print(p->rx_us);
-        Serial.print(",\"rtt_us\":"); Serial.print(p->rtt_us);
-        Serial.print(",\"rssi\":"); Serial.print(p->rssi);
-        Serial.print(",\"crc_ok\":"); Serial.print(p->crc_ok);
-        Serial.print(",\"lost\":"); Serial.print(p->lost);
-        Serial.print(",\"warmup\":"); Serial.print(p->is_warmup);
-        Serial.print("}");
+        int n = snprintf(buf, sizeof(buf),
+            "%s{\"seq\":%u,\"tx_us\":%lu,\"rx_us\":%lu,"
+            "\"rtt_us\":%lu,\"rssi\":%d,\"crc_ok\":%u,"
+            "\"lost\":%u,\"warmup\":%u}",
+            i > 0 ? "," : "",
+            (unsigned)p->seq,
+            (unsigned long)p->tx_us,
+            (unsigned long)p->rx_us,
+            (unsigned long)p->rtt_us,
+            (int)p->rssi,
+            (unsigned)p->crc_ok,
+            (unsigned)p->lost,
+            (unsigned)p->is_warmup);
+        Serial.write(buf, n);
+
+        /* Yield to USB stack every 20 results — avoids Serial.flush()
+         * which can block indefinitely on SAMD21 USB CDC. */
+        if ((i + 1) % 20 == 0) delay(1);
     }
 
-    Serial.println("]}}");
-    Serial.flush();
+    Serial.print("]}}\n");
+    /* Let USB stack drain instead of calling Serial.flush() */
+    delay(10);
+    platform_log("GET_RESULTS: done (%lu results streamed)", (unsigned long)count);
 }
 
 static void handle_stop()

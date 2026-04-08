@@ -24,28 +24,52 @@ import serial
 
 
 def reader_thread(ser: serial.Serial) -> None:
-    """Read lines from serial, route JSON to stdout and logs to stderr."""
+    """Read from serial in chunks, route complete lines to stdout/stderr."""
+    buf = b""
+    last_report = 0
     while True:
         try:
-            raw = ser.readline()
-            if not raw:
-                continue
-            line = raw.decode("utf-8", errors="replace").rstrip("\r\n")
-            if not line:
+            # Read available data in chunks (more efficient than readline)
+            n = ser.in_waiting
+            if n == 0:
+                chunk = ser.read(1)  # block for at least one byte
+            else:
+                chunk = ser.read(n)
+
+            if not chunk:
                 continue
 
-            if line.startswith("{"):
-                # JSON response → stdout for controller
-                sys.stdout.write(line + "\n")
-                sys.stdout.flush()
-            elif line.startswith("#"):
-                # Log line → stderr
-                sys.stderr.write(line + "\n")
+            buf += chunk
+
+            # Process all complete lines in the buffer
+            while b"\n" in buf:
+                line_raw, buf = buf.split(b"\n", 1)
+                line = line_raw.decode("utf-8", errors="replace").rstrip("\r")
+                if not line:
+                    continue
+
+                if line.startswith("{"):
+                    sys.stderr.write(f"# [relay] json {len(line)}b\n")
+                    sys.stderr.flush()
+                    sys.stdout.write(line + "\n")
+                    sys.stdout.flush()
+                elif line.startswith("#"):
+                    sys.stderr.write(line + "\n")
+                    sys.stderr.flush()
+                else:
+                    sys.stderr.write(f"# [relay] ?? {line[:80]}\n")
+                    sys.stderr.flush()
+
+            # Report buffer growth every 4KB while waiting for \n
+            kb = len(buf) // 4096
+            if kb > last_report:
+                last_report = kb
+                sys.stderr.write(
+                    f"# [relay] buffering {len(buf)}b (no newline yet)\n")
                 sys.stderr.flush()
-            else:
-                # Unknown → stderr as debug
-                sys.stderr.write(f"# [relay] {line}\n")
-                sys.stderr.flush()
+            if len(buf) == 0:
+                last_report = 0
+
         except serial.SerialException:
             sys.stderr.write("# [relay] serial read error, exiting reader\n")
             break
@@ -81,9 +105,14 @@ def main() -> None:
     # Wait for Arduino to reset after serial open
     time.sleep(2)
 
-    # Drain any boot messages
+    # Drain any boot messages (short timeout so we don't block on partial data)
     while ser.in_waiting:
         ser.readline()
+
+    # Switch to long timeout for normal operation so readline() can handle
+    # large GET_RESULTS responses (500 results ≈ 40KB, ~3.5s at 115200 baud).
+    # Short responses still return instantly because readline() stops at '\n'.
+    ser.timeout = 120
 
     sys.stderr.write("# [relay] ready\n")
 

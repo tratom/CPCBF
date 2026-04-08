@@ -137,7 +137,7 @@ python cpcbf/analysis/stats_from_json.py results/
 
 ## Schema
 
-Six tables are auto-created on first run.
+Seven tables are auto-created on first run.
 
 ### ER Diagram
 
@@ -147,6 +147,7 @@ erDiagram
     experiments ||--o{ experiment_devices : has
     experiments ||--o{ experiment_media : has
     test_runs ||--o| flood_runs : "1:1 (flood only)"
+    test_runs ||--o{ flood_chunks : "1:N (flood only)"
     test_runs ||--o{ packets : has
 
     experiments {
@@ -195,6 +196,17 @@ erDiagram
         INTEGER receiver_crc_errors
     }
 
+    flood_chunks {
+        BIGSERIAL chunk_id PK
+        INTEGER run_id FK
+        SMALLINT chunk_index
+        INTEGER packet_count
+        BIGINT start_us
+        BIGINT end_us
+        INTEGER lost
+        INTEGER crc_errors
+    }
+
     packets {
         BIGSERIAL id PK
         INTEGER run_id FK
@@ -240,17 +252,18 @@ erDiagram
 | `experiments` | One row per field test + metadata (location, date, environment) |
 | `test_runs` | One row per test — run config + valid flag (no aggregates) |
 | `flood_runs` | 1:1 with `test_runs` for flood mode — sender/receiver aggregates |
+| `flood_chunks` | 5 equal-count time slices per flood run — enables throughput variance/CI/boxplot |
 | `packets` | Per-packet data: RTT sender packets + RSSI receiver packets only |
 | `experiment_devices` | Device info per experiment (role, hardware, IP) |
 | `experiment_media` | Media files per experiment — stores actual file bytes as BLOB (`data` BYTEA) |
 
 ### What gets stored per mode
 
-| Mode | Per-packet rows | Aggregates (`flood_runs`) |
-|------|----------------|---------------------------|
-| **ping_pong** | Sender only (has `rtt_us`) | None |
-| **rssi** | Receiver only (has `rssi`) | None |
-| **flood** | None | Both sides: warmup/measured counts, time span, lost, CRC |
+| Mode | Per-packet rows | Aggregates (`flood_runs`) | Chunks (`flood_chunks`) |
+|------|----------------|---------------------------|-------------------------|
+| **ping_pong** | Sender only (has `rtt_us`) | None | None |
+| **rssi** | Receiver only (has `rssi`) | None | None |
+| **flood** | None | Both sides: warmup/measured counts, time span, lost, CRC | 5 equal-count time slices with packet_count, time span, lost, CRC |
 
 ### Aggregate columns in `flood_runs`
 

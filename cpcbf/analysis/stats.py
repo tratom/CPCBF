@@ -35,6 +35,10 @@ class RunStats:
     rssi_mean: float | None
     rssi_std: float | None
     throughput_bps: float | None
+    throughput_mean_bps: float | None
+    throughput_std_bps: float | None
+    throughput_ci95_low_bps: float | None
+    throughput_ci95_high_bps: float | None
 
 
 def _compute_flood_throughput(protocol: str, payload_size: int,
@@ -86,6 +90,32 @@ def compute_run_stats(conn, run_id: int) -> RunStats:
             duration_us = 0
         throughput = _compute_flood_throughput(protocol, payload_size, packets_rcv, duration_us)
 
+        # Per-chunk throughput stats
+        tp_mean = tp_std = tp_ci_low = tp_ci_high = None
+        cur2 = conn.cursor()
+        cur2.execute(
+            "SELECT packet_count, start_us, end_us FROM flood_chunks "
+            "WHERE run_id = %s ORDER BY chunk_index",
+            (run_id,),
+        )
+        chunk_rows = cur2.fetchall()
+        cur2.close()
+        if chunk_rows:
+            chunk_tps = []
+            for pkt_count, c_start, c_end in chunk_rows:
+                c_dur = c_end - c_start
+                if c_dur < 0:
+                    c_dur += 2**32
+                tp = _compute_flood_throughput(protocol, payload_size, pkt_count, c_dur)
+                if tp is not None:
+                    chunk_tps.append(tp)
+            if len(chunk_tps) > 1:
+                arr = np.array(chunk_tps)
+                tp_mean = float(np.mean(arr))
+                tp_std = float(np.std(arr, ddof=1))
+                ci = stats.t.interval(0.95, len(arr) - 1, loc=tp_mean, scale=stats.sem(arr))
+                tp_ci_low, tp_ci_high = float(ci[0]), float(ci[1])
+
         return RunStats(
             run_id=run_id,
             test_name=test_name,
@@ -101,6 +131,10 @@ def compute_run_stats(conn, run_id: int) -> RunStats:
             crc_error_pct=crc_error_pct,
             jitter_us=None, rssi_mean=None, rssi_std=None,
             throughput_bps=throughput,
+            throughput_mean_bps=tp_mean,
+            throughput_std_bps=tp_std,
+            throughput_ci95_low_bps=tp_ci_low,
+            throughput_ci95_high_bps=tp_ci_high,
         )
 
     # Per-packet analysis: ping_pong -> sender, rssi -> receiver
@@ -172,6 +206,10 @@ def compute_run_stats(conn, run_id: int) -> RunStats:
         rssi_mean=rssi_mean,
         rssi_std=rssi_std,
         throughput_bps=None,
+        throughput_mean_bps=None,
+        throughput_std_bps=None,
+        throughput_ci95_low_bps=None,
+        throughput_ci95_high_bps=None,
     )
 
 

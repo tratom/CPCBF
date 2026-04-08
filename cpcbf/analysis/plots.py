@@ -90,37 +90,73 @@ def _fmt_throughput_label(mbps: float) -> str:
 
 
 def plot_throughput_bar(output_path: str | Path, experiment_id: int | None = None, protocol: str | None = None) -> None:
-    """Throughput by payload size (flood mode), averaged across runs."""
-    from .stats import compute_all_stats
+    """Backward-compatible alias — delegates to boxplot."""
+    plot_throughput_boxplot(output_path, experiment_id=experiment_id, protocol=protocol)
 
-    stats_df = compute_all_stats(experiment_id=experiment_id, protocol=protocol)
-    flood_df = stats_df[stats_df["mode"] == "flood"].copy()
 
-    if flood_df.empty:
+def plot_throughput_boxplot(output_path: str | Path, experiment_id: int | None = None, protocol: str | None = None) -> None:
+    """Throughput boxplot from flood_chunks, one box per payload size."""
+    conn = get_connection()
+    query = """
+        SELECT r.payload_size, r.protocol,
+               fc.packet_count, fc.start_us, fc.end_us
+        FROM flood_chunks fc
+        JOIN test_runs r ON fc.run_id = r.run_id
+        WHERE r.valid = TRUE AND r.mode = 'flood'
+    """
+    params: list = []
+    if experiment_id is not None:
+        query += " AND r.experiment_id = %s"
+        params.append(experiment_id)
+    if protocol is not None:
+        query += " AND r.protocol = %s"
+        params.append(protocol)
+    df = pd.read_sql_query(query, conn, params=params)
+    conn.close()
+
+    if df.empty:
         return
 
-    flood_df["throughput_mbps"] = flood_df["throughput_bps"] / 1e6
+    # Compute per-chunk throughput in Mbps
+    proto = protocol or df["protocol"].iloc[0]
+    overhead = 14 if proto == "ble" else 42
 
-    # Aggregate across runs: mean throughput per payload size
-    agg = flood_df.groupby("payload_size", as_index=False)["throughput_mbps"].mean()
-    agg = agg.sort_values("payload_size")
+    durations = df["end_us"] - df["start_us"]
+    # 32-bit wraparound correction
+    durations = durations.where(durations >= 0, durations + 2**32)
+    df["throughput_mbps"] = (
+        df["packet_count"] * (df["payload_size"] + overhead) * 8
+        / (durations / 1e6)
+        / 1e6
+    )
+    df = df[df["throughput_mbps"].notna() & (durations > 0)]
+
+    if df.empty:
+        return
+
+    # Sort payload sizes for consistent ordering
+    sizes = sorted(df["payload_size"].unique())
+    df["payload_label"] = df["payload_size"].astype(str) + "B"
+    label_order = [f"{s}B" for s in sizes]
 
     fig, ax = plt.subplots(figsize=(10, 6))
-    bars = ax.bar(
-        agg["payload_size"].astype(str),
-        agg["throughput_mbps"],
-        color=sns.color_palette()[0],
+    sns.boxplot(
+        data=df, x="payload_label", y="throughput_mbps",
+        order=label_order, ax=ax, showfliers=True,
     )
 
-    for bar, val in zip(bars, agg["throughput_mbps"]):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height(),
-                _fmt_throughput_label(val), ha="center", va="bottom", fontsize=9,
-                fontweight="bold")
+    # Add median labels
+    for i, size in enumerate(sizes):
+        subset = df[df["payload_size"] == size]["throughput_mbps"]
+        if not subset.empty:
+            med = subset.median()
+            ax.text(i, med, _fmt_throughput_label(med),
+                    ha="center", va="bottom", fontsize=9, fontweight="bold")
 
-    ax.set_xlabel("Payload Size (bytes)")
+    ax.set_xlabel("Payload Size")
     ax.set_ylabel("Throughput (Mbps)")
-    ax.set_title("Throughput by Payload Size (Flood Mode)")
-    ax.set_ylim(bottom=0, top=agg["throughput_mbps"].max() * 1.15)
+    ax.set_title("Throughput Distribution by Payload Size (Flood Mode)")
+    ax.set_ylim(bottom=0)
     fig.tight_layout()
     fig.savefig(str(output_path), dpi=150)
     plt.close(fig)

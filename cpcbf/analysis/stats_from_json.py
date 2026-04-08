@@ -43,6 +43,43 @@ class RunStats:
     rssi_mean: float | None
     rssi_std: float | None
     throughput_bps: float | None
+    throughput_mean_bps: float | None
+    throughput_std_bps: float | None
+    throughput_ci95_low_bps: float | None
+    throughput_ci95_high_bps: float | None
+
+
+def _compute_chunk_throughput_stats(
+    valid_packets: list[dict], protocol: str, payload_size: int, n_chunks: int = 5,
+) -> tuple[float | None, float | None, float | None, float | None]:
+    """Split packets into n_chunks by rx_us, compute throughput per chunk, return stats."""
+    rx_times = sorted(p["rx_us"] for p in valid_packets if p.get("rx_us", 0) > 0)
+    if len(rx_times) < n_chunks * 2:
+        return None, None, None, None
+
+    overhead = 14 if protocol == "ble" else 42
+    wire_bytes = payload_size + overhead
+
+    chunks = np.array_split(rx_times, n_chunks)
+    chunk_tps = []
+    for chunk in chunks:
+        if len(chunk) < 2:
+            continue
+        duration_us = chunk[-1] - chunk[0]
+        if duration_us < 0:
+            duration_us += 2**32
+        if duration_us > 0:
+            total_bits = len(chunk) * wire_bytes * 8
+            chunk_tps.append(total_bits / (duration_us / 1e6))
+
+    if len(chunk_tps) < 2:
+        return None, None, None, None
+
+    arr = np.array(chunk_tps)
+    tp_mean = float(np.mean(arr))
+    tp_std = float(np.std(arr, ddof=1))
+    ci = sp_stats.t.interval(0.95, len(arr) - 1, loc=tp_mean, scale=sp_stats.sem(arr))
+    return tp_mean, tp_std, float(ci[0]), float(ci[1])
 
 
 def compute_stats_from_record(rec: dict) -> RunStats:
@@ -97,6 +134,10 @@ def compute_stats_from_record(rec: dict) -> RunStats:
             crc_error_pct=crc_error_pct,
             jitter_us=None, rssi_mean=None, rssi_std=None,
             throughput_bps=throughput,
+            throughput_mean_bps=None,
+            throughput_std_bps=None,
+            throughput_ci95_low_bps=None,
+            throughput_ci95_high_bps=None,
         )
 
     # Per-packet analysis path (original)
@@ -142,15 +183,22 @@ def compute_stats_from_record(rec: dict) -> RunStats:
 
     # Throughput (flood mode)
     throughput = None
+    tp_mean = tp_std = tp_ci_low = tp_ci_high = None
     if mode == "flood" and len(valid) > 1:
         rx_times = sorted(p["rx_us"] for p in valid if p.get("rx_us", 0) > 0)
         if len(rx_times) > 1:
             duration_us = rx_times[-1] - rx_times[0]
+            if duration_us < 0:
+                duration_us += 2**32
             if duration_us > 0:
                 overhead = 14 if protocol == "ble" else 42
                 wire_bytes = payload_size + overhead
                 total_bits = len(rx_times) * wire_bytes * 8
                 throughput = total_bits / (duration_us / 1e6)
+        # Per-chunk throughput stats
+        tp_mean, tp_std, tp_ci_low, tp_ci_high = _compute_chunk_throughput_stats(
+            valid, protocol, payload_size,
+        )
 
     return RunStats(
         test_name=test_name,
@@ -172,6 +220,10 @@ def compute_stats_from_record(rec: dict) -> RunStats:
         rssi_mean=rssi_mean,
         rssi_std=rssi_std,
         throughput_bps=throughput,
+        throughput_mean_bps=tp_mean,
+        throughput_std_bps=tp_std,
+        throughput_ci95_low_bps=tp_ci_low,
+        throughput_ci95_high_bps=tp_ci_high,
     )
 
 
@@ -263,14 +315,22 @@ def print_results(all_stats: list[RunStats]) -> None:
         print()
         print("── Flood (Throughput) Results ──")
         print()
-        fmt_f = "{:<10} {:>8} {:>12} {:>10} {:>8}"
-        print(fmt_f.format("Payload", "Samples", "Throughput", "Loss%", "CRC Err%"))
-        print("-" * 55)
+        fmt_f = "{:<10} {:>8} {:>14} {:>14} {:>14} {:>10} {:>8}"
+        print(fmt_f.format("Payload", "Samples", "Mean TP", "Std TP", "95% CI", "Loss%", "CRC Err%"))
+        print("-" * 95)
         for _, row in flood_df.sort_values("payload_size").iterrows():
+            mean_s = fmt_throughput(row["throughput_mean_bps"])
+            std_s = fmt_throughput(row["throughput_std_bps"])
+            if row["throughput_ci95_low_bps"] and row["throughput_ci95_high_bps"]:
+                ci_s = f"[{fmt_throughput(row['throughput_ci95_low_bps'])}, {fmt_throughput(row['throughput_ci95_high_bps'])}]"
+            else:
+                ci_s = "N/A"
             print(fmt_f.format(
                 f"{int(row['payload_size'])}B",
                 int(row["packets_measured"]),
-                fmt_throughput(row["throughput_bps"]),
+                mean_s,
+                std_s,
+                ci_s,
                 f"{row['packet_loss_pct']:.1f}",
                 f"{row['crc_error_pct']:.1f}",
             ))

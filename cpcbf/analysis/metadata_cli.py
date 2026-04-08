@@ -23,6 +23,7 @@ def _skeleton(scenario_id: str) -> dict:
     return {
         "scenario_id": scenario_id,
         "location": "",
+        "environment_type": "",
         "test_date": date.today().isoformat(),
         "distance_meters": 0,
         "test_procedure_description": "",

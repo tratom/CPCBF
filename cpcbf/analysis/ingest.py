@@ -9,6 +9,7 @@ import mimetypes
 import re
 from pathlib import Path
 
+import numpy as np
 import psycopg2
 import psycopg2.extras
 
@@ -24,6 +25,7 @@ CREATE TABLE IF NOT EXISTS experiments (
     description               TEXT,
     created_at                TIMESTAMPTZ NOT NULL DEFAULT now(),
     location                  TEXT,
+    environment_type          TEXT,
     test_date                 DATE,
     distance_meters           REAL,
     duration_minutes          INTEGER,
@@ -86,6 +88,20 @@ CREATE INDEX IF NOT EXISTS idx_packets_run_id ON packets(run_id);
 CREATE INDEX IF NOT EXISTS idx_packets_run_source_warmup ON packets(run_id, source, warmup);
 CREATE INDEX IF NOT EXISTS idx_test_runs_experiment ON test_runs(experiment_id);
 CREATE INDEX IF NOT EXISTS idx_test_runs_valid ON test_runs(valid) WHERE valid = TRUE;
+
+-- Flood throughput chunks: 5 equal-count time slices per flood run
+CREATE TABLE IF NOT EXISTS flood_chunks (
+    chunk_id        BIGSERIAL PRIMARY KEY,
+    run_id          INTEGER NOT NULL REFERENCES test_runs(run_id) ON DELETE CASCADE,
+    chunk_index     SMALLINT NOT NULL,
+    packet_count    INTEGER NOT NULL,
+    start_us        BIGINT NOT NULL,
+    end_us          BIGINT NOT NULL,
+    lost            INTEGER NOT NULL DEFAULT 0,
+    crc_errors      INTEGER NOT NULL DEFAULT 0,
+    UNIQUE (run_id, chunk_index)
+);
+CREATE INDEX IF NOT EXISTS idx_flood_chunks_run ON flood_chunks(run_id);
 
 -- Devices per experiment
 CREATE TABLE IF NOT EXISTS experiment_devices (
@@ -162,6 +178,36 @@ def _compute_side_aggregates(side_data: dict) -> dict:
     }
 
 
+def _compute_flood_chunks(receiver_data: dict, n_chunks: int = 5) -> list[dict]:
+    """Split measured receiver packets into n_chunks equal-count time slices."""
+    packets = receiver_data.get("packets", [])
+    measured = [p for p in packets if not p.get("warmup")]
+    if not measured:
+        return []
+
+    # Sort by rx_us
+    measured.sort(key=lambda p: p.get("rx_us", 0))
+    chunks_arr = np.array_split(measured, n_chunks)
+
+    result_chunks = []
+    for i, chunk in enumerate(chunks_arr):
+        chunk = list(chunk)
+        if not chunk:
+            continue
+        times = [p["rx_us"] for p in chunk if p.get("rx_us", 0) > 0]
+        if len(times) < 2:
+            continue
+        result_chunks.append({
+            "chunk_index": i,
+            "packet_count": len(chunk),
+            "start_us": times[0],
+            "end_us": times[-1],
+            "lost": sum(1 for p in chunk if p.get("lost")),
+            "crc_errors": sum(1 for p in chunk if not p.get("crc_ok")),
+        })
+    return result_chunks
+
+
 def ingest_run(conn, experiment_id: int, result: dict) -> int | None:
     """Insert one test run. Returns run_id or None if duplicate.
 
@@ -235,6 +281,25 @@ def ingest_run(conn, experiment_id: int, result: dict) -> int | None:
                 receiver_agg.get("crc_errors"),
             ),
         )
+
+        # Insert flood chunks
+        flood_chunks = result.get("flood_chunks", [])
+        if flood_chunks:
+            chunk_rows = [
+                (run_id, c["chunk_index"], c["packet_count"],
+                 c["start_us"], c["end_us"], c["lost"], c["crc_errors"])
+                for c in flood_chunks
+            ]
+            psycopg2.extras.execute_values(
+                cur,
+                """
+                INSERT INTO flood_chunks
+                    (run_id, chunk_index, packet_count, start_us, end_us,
+                     lost, crc_errors)
+                VALUES %s
+                """,
+                chunk_rows,
+            )
 
     # Insert per-packet data (already mode-filtered by caller)
     packets = result.get("packets", [])
@@ -344,9 +409,12 @@ def ingest_directory(dir_path: Path, experiment_name: str | None = None) -> int:
         receiver_data = sides.get("receiver", {})
 
         # Compute aggregates only for flood (RTT/RSSI have all packets stored)
+        flood_chunks = []
         if mode == "flood":
             sender_agg = _compute_side_aggregates(sender_data) if sender_data else {}
             receiver_agg = _compute_side_aggregates(receiver_data) if receiver_data else {}
+            if receiver_data:
+                flood_chunks = _compute_flood_chunks(receiver_data)
         else:
             sender_agg = {}
             receiver_agg = {}
@@ -384,6 +452,7 @@ def ingest_directory(dir_path: Path, experiment_name: str | None = None) -> int:
             "timestamp": meta.get("timestamp", 0),
             "sender_agg": sender_agg,
             "receiver_agg": receiver_agg,
+            "flood_chunks": flood_chunks,
             "packets": packets,
             "packets_source": packets_source,
         }
@@ -434,9 +503,12 @@ def ingest_jsonl(jsonl_path: str | Path, experiment_name: str | None = None) -> 
             sender_data = raw.get("sender", {})
             receiver_data = raw.get("receiver", {})
 
+            flood_chunks = []
             if mode == "flood":
                 sender_agg = _compute_side_aggregates(sender_data) if sender_data else {}
                 receiver_agg = _compute_side_aggregates(receiver_data) if receiver_data else {}
+                if receiver_data:
+                    flood_chunks = _compute_flood_chunks(receiver_data)
             else:
                 sender_agg = {}
                 receiver_agg = {}
@@ -465,6 +537,7 @@ def ingest_jsonl(jsonl_path: str | Path, experiment_name: str | None = None) -> 
                 "timestamp": raw["timestamp"],
                 "sender_agg": sender_agg,
                 "receiver_agg": receiver_agg,
+                "flood_chunks": flood_chunks,
                 "packets": packets,
                 "packets_source": packets_source,
             }
@@ -487,6 +560,7 @@ def ingest_experiment_metadata(
         """
         UPDATE experiments SET
             location = %s,
+            environment_type = %s,
             test_date = %s,
             distance_meters = %s,
             duration_minutes = %s,
@@ -497,6 +571,7 @@ def ingest_experiment_metadata(
         """,
         (
             metadata.get("location"),
+            metadata.get("environment_type"),
             metadata.get("test_date"),
             metadata.get("distance_meters"),
             metadata.get("duration_minutes"),

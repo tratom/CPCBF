@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -62,9 +63,21 @@ class SerialBridgeTransport:
         cmd = f"python3 {remote_relay} {port} {baud}"
         logger.info("Starting serial relay: %s", cmd)
 
-        self._stdin, self._stdout, _ = self._client.exec_command(
+        self._stdin, self._stdout, self._stderr = self._client.exec_command(
             cmd, get_pty=False
         )
+
+        # Drain stderr in background to prevent SSH buffer from filling up
+        # and blocking the relay's reader thread.
+        def _drain_stderr():
+            try:
+                for line in self._stderr:
+                    logger.debug("[relay@%s] %s", self.host.hostname, line.rstrip())
+            except Exception:
+                pass
+
+        self._stderr_thread = threading.Thread(target=_drain_stderr, daemon=True)
+        self._stderr_thread.start()
 
     def send_command(self, cmd_dict: dict, timeout: float = 30.0) -> dict:
         """Send a JSON command through the relay to the Arduino."""

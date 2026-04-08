@@ -18,7 +18,7 @@ from .compare import comparison_table
 from .plots import (
     plot_rtt_boxplot,
     plot_rtt_cdf,
-    plot_throughput_bar,
+    plot_throughput_boxplot,
     plot_loss_bar,
     plot_rssi_timeseries,
 )
@@ -108,14 +108,24 @@ def _print_protocol_stats(stats_df: pd.DataFrame) -> None:
             print()
             print("  ── Flood (Throughput) Results ──")
             print()
-            fmt_f = "  {:<10} {:>8} {:>12} {:>10} {:>8}"
-            print(fmt_f.format("Payload", "Samples", "Throughput", "Loss%", "CRC Err%"))
-            print("  " + "-" * 53)
+            fmt_f = "  {:<10} {:>8} {:>14} {:>14} {:>14} {:>10} {:>8}"
+            print(fmt_f.format("Payload", "Samples", "Mean TP", "Std TP", "95% CI", "Loss%", "CRC Err%"))
+            print("  " + "-" * 93)
             for _, row in flood_df.sort_values("payload_size").iterrows():
+                mean_s = _fmt_throughput(row.get("throughput_mean_bps"))
+                std_s = _fmt_throughput(row.get("throughput_std_bps"))
+                ci_low = row.get("throughput_ci95_low_bps")
+                ci_high = row.get("throughput_ci95_high_bps")
+                if ci_low and ci_high:
+                    ci_s = f"[{_fmt_throughput(ci_low)}, {_fmt_throughput(ci_high)}]"
+                else:
+                    ci_s = "N/A"
                 print(fmt_f.format(
                     f"{int(row['payload_size'])}B",
                     int(row["packets_measured"]),
-                    _fmt_throughput(row["throughput_bps"]),
+                    mean_s,
+                    std_s,
+                    ci_s,
                     f"{row['packet_loss_pct']:.1f}",
                     f"{row['crc_error_pct']:.1f}",
                 ))
@@ -195,7 +205,7 @@ def main():
         proto_dir.mkdir(exist_ok=True)
         plot_rtt_boxplot(proto_dir / "rtt_boxplot.png", experiment_id=experiment_id, protocol=proto)
         plot_rtt_cdf(proto_dir / "rtt_cdf.png", experiment_id=experiment_id, protocol=proto)
-        plot_throughput_bar(proto_dir / "throughput.png", experiment_id=experiment_id, protocol=proto)
+        plot_throughput_boxplot(proto_dir / "throughput.png", experiment_id=experiment_id, protocol=proto)
         plot_loss_bar(proto_dir / "loss.png", experiment_id=experiment_id, protocol=proto)
         plot_rssi_timeseries(proto_dir / "rssi.png", experiment_id=experiment_id, protocol=proto)
         print(f"  {proto} -> {proto_dir}/")
