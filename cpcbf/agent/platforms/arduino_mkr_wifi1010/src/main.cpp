@@ -373,6 +373,12 @@ void setup()
 
 void loop()
 {
+#ifdef CPCBF_PROTOCOL_BLE
+    /* Keep processing BLE events (ATT requests, notifications, etc.)
+     * so the peripheral responds to GATT discovery and data exchanges. */
+    if (g_adapter_ready) BLE.poll();
+#endif
+
     if (!Serial.available()) return;
 
     String line = Serial.readStringUntil('\n');

@@ -46,7 +46,7 @@ static void run_ping_pong_sender(protocol_adapter_t *adapter,
 
         int enc_len = bench_packet_encode(&pkt, tx_buf, sizeof(tx_buf));
         if (enc_len < 0) {
-            platform_log("encode error seq=%u", i);
+            platform_log("encode error seq=%lu", (unsigned long)i);
             continue;
         }
 
@@ -65,8 +65,8 @@ static void run_ping_pong_sender(protocol_adapter_t *adapter,
             res->result_count++;
             consecutive_timeouts++;
             if (consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
-                platform_log("pp_tx: %u consecutive send failures, aborting",
-                             consecutive_timeouts);
+                platform_log("pp_tx: %lu consecutive send failures, aborting",
+                             (unsigned long)consecutive_timeouts);
                 res->early_aborted = 1;
                 break;
             }
@@ -84,8 +84,8 @@ static void run_ping_pong_sender(protocol_adapter_t *adapter,
             res->result_count++;
             consecutive_timeouts++;
             if (consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
-                platform_log("pp_tx: %u consecutive timeouts, aborting",
-                             consecutive_timeouts);
+                platform_log("pp_tx: %lu consecutive timeouts, aborting",
+                             (unsigned long)consecutive_timeouts);
                 res->early_aborted = 1;
                 break;
             }
@@ -161,8 +161,8 @@ static void run_ping_pong_receiver(protocol_adapter_t *adapter,
             res->result_count++;
             consecutive_timeouts++;
             if (consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
-                platform_log("pp_rx: %u consecutive timeouts, aborting",
-                             consecutive_timeouts);
+                platform_log("pp_rx: %lu consecutive timeouts, aborting",
+                             (unsigned long)consecutive_timeouts);
                 res->early_aborted = 1;
                 break;
             }
@@ -277,8 +277,9 @@ static void run_flood_receiver(protocol_adapter_t *adapter,
             /* After receiving at least one packet, stop on consecutive timeouts */
             if (res->packets_received > 0 &&
                 consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
-                platform_log("flood_rx: %u consecutive timeouts after %u packets, stopping",
-                             consecutive_timeouts, res->packets_received);
+                platform_log("flood_rx: %lu consecutive timeouts after %lu packets, stopping",
+                             (unsigned long)consecutive_timeouts,
+                             (unsigned long)res->packets_received);
                 res->early_aborted = 1;
                 break;
             }
@@ -361,8 +362,8 @@ static void run_rssi_sampler(protocol_adapter_t *adapter,
             res->packets_lost++;
             consecutive_failures++;
             if (consecutive_failures >= MAX_CONSECUTIVE_TIMEOUTS) {
-                platform_log("rssi: %u consecutive failures, aborting",
-                             consecutive_failures);
+                platform_log("rssi: %lu consecutive failures, aborting",
+                             (unsigned long)consecutive_failures);
                 res->result_count++;
                 res->early_aborted = 1;
                 break;
@@ -434,32 +435,32 @@ char *test_results_to_json(const test_results_t *results,
         "{\n"
         "  \"mode\": \"%s\",\n"
         "  \"role\": \"%s\",\n"
-        "  \"payload_size\": %u,\n"
-        "  \"repetitions\": %u,\n"
-        "  \"warmup\": %u,\n"
-        "  \"packets_sent\": %u,\n"
-        "  \"packets_received\": %u,\n"
-        "  \"packets_lost\": %u,\n"
-        "  \"crc_errors\": %u,\n"
-        "  \"start_us\": %u,\n"
-        "  \"end_us\": %u,\n"
-        "  \"aggregate_only\": %u,\n"
-        "  \"early_aborted\": %u,\n"
+        "  \"payload_size\": %lu,\n"
+        "  \"repetitions\": %lu,\n"
+        "  \"warmup\": %lu,\n"
+        "  \"packets_sent\": %lu,\n"
+        "  \"packets_received\": %lu,\n"
+        "  \"packets_lost\": %lu,\n"
+        "  \"crc_errors\": %lu,\n"
+        "  \"start_us\": %lu,\n"
+        "  \"end_us\": %lu,\n"
+        "  \"aggregate_only\": %lu,\n"
+        "  \"early_aborted\": %lu,\n"
         "  \"packets\": [\n",
         cfg->mode == TEST_MODE_PING_PONG ? "ping_pong" :
         cfg->mode == TEST_MODE_FLOOD     ? "flood"     : "rssi",
         cfg->role == ROLE_SENDER ? "sender" : "receiver",
-        cfg->payload_size,
-        cfg->repetitions,
-        cfg->warmup,
-        results->packets_sent,
-        results->packets_received,
-        results->packets_lost,
-        results->crc_errors,
-        results->start_us,
-        results->end_us,
-        results->aggregate_only,
-        results->early_aborted);
+        (unsigned long)cfg->payload_size,
+        (unsigned long)cfg->repetitions,
+        (unsigned long)cfg->warmup,
+        (unsigned long)results->packets_sent,
+        (unsigned long)results->packets_received,
+        (unsigned long)results->packets_lost,
+        (unsigned long)results->crc_errors,
+        (unsigned long)results->start_us,
+        (unsigned long)results->end_us,
+        (unsigned long)results->aggregate_only,
+        (unsigned long)results->early_aborted);
 
     for (uint32_t i = 0; i < results->result_count; i++) {
         const packet_result_t *p = &results->results[i];
@@ -473,11 +474,11 @@ char *test_results_to_json(const test_results_t *results,
         }
 
         off += snprintf(buf + off, buf_size - off,
-            "    {\"seq\": %u, \"tx_us\": %u, \"rx_us\": %u, "
-            "\"rtt_us\": %u, \"rssi\": %d, \"crc_ok\": %u, "
+            "    {\"seq\": %u, \"tx_us\": %lu, \"rx_us\": %lu, "
+            "\"rtt_us\": %lu, \"rssi\": %d, \"crc_ok\": %u, "
             "\"lost\": %u, \"warmup\": %u}%s\n",
-            p->seq, p->tx_us, p->rx_us,
-            p->rtt_us, p->rssi, p->crc_ok,
+            p->seq, (unsigned long)p->tx_us, (unsigned long)p->rx_us,
+            (unsigned long)p->rtt_us, p->rssi, p->crc_ok,
             p->lost, p->is_warmup,
             (i + 1 < results->result_count) ? "," : "");
     }

@@ -49,8 +49,8 @@ int sync_barrier_wait(protocol_adapter_t *adapter, uint32_t timeout_ms,
     build_beacon(req, SYNC_TYPE_REQ, my_phase, my_test_idx);
     build_beacon(ack, SYNC_TYPE_ACK, my_phase, my_test_idx);
 
-    platform_log("sync: waiting for peer (timeout %u ms, phase %u, test_idx %u)",
-                 timeout_ms, my_phase, my_test_idx);
+    platform_log("sync: waiting for peer (timeout %lu ms, phase %u, test_idx %u)",
+                 (unsigned long)timeout_ms, my_phase, my_test_idx);
 
     while (elapsed < timeout_ms) {
         /* Send SYNC_REQ with our phase + test_idx */
@@ -95,7 +95,7 @@ int sync_barrier_wait(protocol_adapter_t *adapter, uint32_t timeout_ms,
     }
 
     if (!got_ack) {
-        platform_log("sync: timeout after %u ms", timeout_ms);
+        platform_log("sync: timeout after %lu ms", (unsigned long)timeout_ms);
         return SYNC_TIMEOUT;
     }
 

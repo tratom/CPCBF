@@ -2,9 +2,9 @@ global:
   repetitions: 2000
   warmup: 10
   timeout_ms: 500
-  inter_packet_us: 0
+  inter_packet_us: 5000
   port: 5201
-  channel: 1
+  channel: 5
   topology: softap
   essid: CPCBF_MKR
   cooldown_s: 5

@@ -33,3 +33,6 @@ cpcbf/field/results/
 
 # Logs
 *.log
+
+# IDE
+.vscode/
