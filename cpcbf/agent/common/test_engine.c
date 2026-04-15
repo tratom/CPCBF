@@ -8,16 +8,46 @@
 #include <string.h>
 #include <stdio.h>
 
+#ifdef ARDUINO_PLATFORM
+/* Arduino heap is tight (~8 KB on SAMD21 after BSS + BLE dynamic state)
+ * and newlib-nano's _sbrk can return a stack-overlapping pointer when
+ * the heap window is crowded, causing calloc to hardfault inside memset.
+ * Use a fixed BSS buffer instead so the hot path is heap-free.
+ * CPCBF_STATIC_RESULTS_MAX must be >= max (warmup + repetitions) used. */
+#ifndef CPCBF_STATIC_RESULTS_MAX
+#define CPCBF_STATIC_RESULTS_MAX 120
+#endif
+
+static uint8_t s_results_storage[
+    sizeof(test_results_t) + CPCBF_STATIC_RESULTS_MAX * sizeof(packet_result_t)
+];
+#endif
+
 test_results_t *test_results_alloc(uint32_t max_packets)
 {
+#ifdef ARDUINO_PLATFORM
+    if (max_packets > CPCBF_STATIC_RESULTS_MAX) {
+        platform_log("test_results_alloc: %lu > static max %u",
+                     (unsigned long)max_packets,
+                     (unsigned)CPCBF_STATIC_RESULTS_MAX);
+        return NULL;
+    }
     size_t sz = sizeof(test_results_t) + max_packets * sizeof(packet_result_t);
-    test_results_t *r = calloc(1, sz);
-    return r;
+    memset(s_results_storage, 0, sz);
+    return (test_results_t *)s_results_storage;
+#else
+    size_t sz = sizeof(test_results_t) + max_packets * sizeof(packet_result_t);
+    return calloc(1, sz);
+#endif
 }
 
 void test_results_free(test_results_t *r)
 {
+#ifdef ARDUINO_PLATFORM
+    (void)r;
+#else
     free(r);
+#endif
 }
 
 /* ---- Ping-pong sender ---- */
@@ -31,6 +61,9 @@ static void run_ping_pong_sender(protocol_adapter_t *adapter,
     uint8_t rx_buf[BENCH_MAX_PAYLOAD + BENCH_OVERHEAD];
     bench_packet_t pkt;
     uint32_t consecutive_timeouts = 0;
+
+    platform_log("pp_tx: entry total=%lu timeout_ms=%lu",
+                 (unsigned long)total, (unsigned long)cfg->timeout_ms);
 
     memset(&pkt, 0, sizeof(pkt));
     pkt.msg_type = MSG_PING;
@@ -144,6 +177,9 @@ static void run_ping_pong_receiver(protocol_adapter_t *adapter,
     uint8_t rx_buf[BENCH_MAX_PAYLOAD + BENCH_OVERHEAD];
     uint8_t tx_buf[BENCH_MAX_PAYLOAD + BENCH_OVERHEAD];
     uint32_t consecutive_timeouts = 0;
+
+    platform_log("pp_rx: entry total=%lu timeout_ms=%lu",
+                 (unsigned long)total, (unsigned long)cfg->timeout_ms);
 
     for (uint32_t i = 0; i < total; i++) {
         size_t rx_len = 0;
@@ -274,9 +310,8 @@ static void run_flood_receiver(protocol_adapter_t *adapter,
 
         if (rc == ADAPTER_ERR_TIMEOUT || rc == ADAPTER_ERR_RECV) {
             consecutive_timeouts++;
-            /* After receiving at least one packet, stop on consecutive timeouts */
-            if (res->packets_received > 0 &&
-                consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
+            /* Stop after sustained silence — sender is done or link dropped */
+            if (consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
                 platform_log("flood_rx: %lu consecutive timeouts after %lu packets, stopping",
                              (unsigned long)consecutive_timeouts,
                              (unsigned long)res->packets_received);

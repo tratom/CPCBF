@@ -29,6 +29,10 @@ extern "C" protocol_adapter_t wifi_nina_adapter;
 #ifdef CPCBF_PROTOCOL_BLE
 extern "C" protocol_adapter_t ble_nina_adapter;
 extern "C" const char *ble_nina_last_error(void);
+extern "C" void ble_nina_shutdown(void);
+extern "C" void ble_nina_poll(void);
+extern "C" int ble_nina_ensure_stack(void);
+extern "C" const char *ble_nina_local_addr(void);
 #endif
 
 /* Agent state */
@@ -70,6 +74,7 @@ static void send_error(const char *message)
 
 static void handle_configure(JsonObject params)
 {
+    platform_log("cfg: enter");
     memset(&g_adapter_cfg, 0, sizeof(g_adapter_cfg));
 
     if (params["iface_name"].is<const char *>())
@@ -158,8 +163,10 @@ static void handle_radio_disable(JsonObject params)
         WiFi.end();
 #endif
 #ifdef CPCBF_PROTOCOL_BLE
-    if (strcmp(subsystem, "bluetooth") == 0 || strcmp(subsystem, "all") == 0)
-        BLE.end();
+    if (strcmp(subsystem, "bluetooth") == 0 || strcmp(subsystem, "all") == 0) {
+        ble_nina_shutdown();
+        g_adapter_ready = 0;
+    }
 #endif
 
     send_ok("radio disabled");
@@ -361,6 +368,23 @@ static void handle_stop()
     send_ok("stopped");
 }
 
+static void handle_get_ble_addr()
+{
+#ifdef CPCBF_PROTOCOL_BLE
+    if (ble_nina_ensure_stack() != ADAPTER_OK) {
+        send_error("BLE init failed");
+        return;
+    }
+    JsonDocument doc;
+    doc["status"] = "ok";
+    doc["message"] = "ble addr";
+    doc["data"]["ble_mac"] = ble_nina_local_addr();
+    send_json(doc);
+#else
+    send_error("BLE not compiled in");
+#endif
+}
+
 /* ---- Arduino entry points ---- */
 
 void setup()
@@ -375,8 +399,10 @@ void loop()
 {
 #ifdef CPCBF_PROTOCOL_BLE
     /* Keep processing BLE events (ATT requests, notifications, etc.)
-     * so the peripheral responds to GATT discovery and data exchanges. */
-    if (g_adapter_ready) BLE.poll();
+     * so the peripheral responds to GATT discovery and data exchanges.
+     * Uses s_ble_stack_active (not g_adapter_ready) so events are
+     * processed even between tests when the adapter is deinitialized. */
+    ble_nina_poll();
 #endif
 
     if (!Serial.available()) return;
@@ -421,6 +447,8 @@ void loop()
         handle_get_results();
     } else if (strcmp(command, "STOP") == 0) {
         handle_stop();
+    } else if (strcmp(command, "GET_BLE_ADDR") == 0) {
+        handle_get_ble_addr();
     } else {
         send_error("unknown command");
     }

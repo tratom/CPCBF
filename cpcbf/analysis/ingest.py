@@ -31,8 +31,11 @@ CREATE TABLE IF NOT EXISTS experiments (
     duration_minutes          INTEGER,
     test_procedure            TEXT,
     environment_description   TEXT,
-    interference_json         JSONB
+    interference_json         JSONB,
+    static_interference_json  JSONB
 );
+
+ALTER TABLE experiments ADD COLUMN IF NOT EXISTS static_interference_json JSONB;
 
 CREATE TABLE IF NOT EXISTS test_runs (
     run_id          SERIAL PRIMARY KEY,
@@ -566,7 +569,8 @@ def ingest_experiment_metadata(
             duration_minutes = %s,
             test_procedure = %s,
             environment_description = %s,
-            interference_json = %s
+            interference_json = %s,
+            static_interference_json = %s
         WHERE experiment_id = %s
         """,
         (
@@ -579,6 +583,9 @@ def ingest_experiment_metadata(
             metadata.get("environmental_description"),
             json.dumps(metadata["dynamic_interference"])
             if metadata.get("dynamic_interference")
+            else None,
+            json.dumps(metadata["static_interference"])
+            if metadata.get("static_interference")
             else None,
             experiment_id,
         ),

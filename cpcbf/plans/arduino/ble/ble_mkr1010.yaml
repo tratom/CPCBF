@@ -7,13 +7,13 @@ global:
   cooldown_s: 15
 
 tests:
-  - name: ble_mkr1010_rssi
-    mode: rssi
-    protocol: ble
-    board: mkr_wifi_1010
-    repetitions: 100
-    inter_packet_us: 100000     # 100ms → 10s
-    payload_sizes: [0]
+  # - name: ble_mkr1010_rssi
+  #   mode: rssi
+  #   protocol: ble
+  #   board: mkr_wifi_1010
+  #   repetitions: 100
+  #   inter_packet_us: 100000     # 100ms → 10s
+  #   payload_sizes: [0]
 
   - name: ble_mkr1010_rtt
     mode: ping_pong
@@ -23,10 +23,10 @@ tests:
     inter_packet_us: 1000000    # 1s → 5min
     payload_sizes: [32]
 
-  - name: ble_mkr1010_flood
-    mode: flood
-    protocol: ble
-    board: mkr_wifi_1010
-    repetitions: 2000 #30000          # conservative start, tune after first run
-    inter_packet_us: 0
-    payload_sizes: [230]        # max: 244 ATT - 14 bench overhead
+  # - name: ble_mkr1010_flood
+  #   mode: flood
+  #   protocol: ble
+  #   board: mkr_wifi_1010
+  #   repetitions: 4850
+  #   inter_packet_us: 60000          # 60ms pacing — 28.5 kbps @ 220B, ~2% loss
+  #   payload_sizes: [127]            # max reliable size with DLE on NINA

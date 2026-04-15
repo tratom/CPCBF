@@ -9,7 +9,7 @@ build/
 cpcbf/agent/build/
 
 # PlatformIO
-.pio/
+*.pio/
 
 # Config (local credentials)
 *.conf
@@ -36,3 +36,14 @@ cpcbf/field/results/
 
 # IDE
 .vscode/
+
+# AI
+.cursorrules
+.mcp.json
+.opencode.json
+.windsurfrules
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+.claude/
+.code-review-graph/

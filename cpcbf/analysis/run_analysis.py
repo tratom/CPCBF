@@ -112,14 +112,21 @@ def _print_protocol_stats(stats_df: pd.DataFrame) -> None:
             print(fmt_f.format("Payload", "Samples", "Mean TP", "Std TP", "95% CI", "Loss%", "CRC Err%"))
             print("  " + "-" * 93)
             for _, row in flood_df.sort_values("payload_size").iterrows():
-                mean_s = _fmt_throughput(row.get("throughput_mean_bps"))
-                std_s = _fmt_throughput(row.get("throughput_std_bps"))
-                ci_low = row.get("throughput_ci95_low_bps")
-                ci_high = row.get("throughput_ci95_high_bps")
-                if ci_low and ci_high:
-                    ci_s = f"[{_fmt_throughput(ci_low)}, {_fmt_throughput(ci_high)}]"
-                else:
+                mean_bps = row.get("throughput_mean_bps")
+                # Fall back to aggregate throughput when no per-chunk data (e.g. Arduino)
+                if mean_bps is None or pd.isna(mean_bps):
+                    mean_s = _fmt_throughput(row.get("throughput_bps")) + "*"
+                    std_s = "N/A"
                     ci_s = "N/A"
+                else:
+                    mean_s = _fmt_throughput(mean_bps)
+                    std_s = _fmt_throughput(row.get("throughput_std_bps"))
+                    ci_low = row.get("throughput_ci95_low_bps")
+                    ci_high = row.get("throughput_ci95_high_bps")
+                    if ci_low and ci_high:
+                        ci_s = f"[{_fmt_throughput(ci_low)}, {_fmt_throughput(ci_high)}]"
+                    else:
+                        ci_s = "N/A"
                 print(fmt_f.format(
                     f"{int(row['payload_size'])}B",
                     int(row["packets_measured"]),
@@ -129,6 +136,7 @@ def _print_protocol_stats(stats_df: pd.DataFrame) -> None:
                     f"{row['packet_loss_pct']:.1f}",
                     f"{row['crc_error_pct']:.1f}",
                 ))
+            print("  * = aggregate throughput only (no per-chunk data)")
 
         # RSSI Summary
         rssi_rows = proto_df[proto_df["rssi_mean"].notna()]

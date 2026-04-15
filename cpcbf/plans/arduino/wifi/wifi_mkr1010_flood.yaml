@@ -2,7 +2,7 @@ global:
   repetitions: 2000
   warmup: 10
   timeout_ms: 500
-  inter_packet_us: 5000
+  inter_packet_us: 0
   port: 5201
   channel: 5
   topology: softap

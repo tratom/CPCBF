@@ -10,6 +10,7 @@ hosts:
     serial_port: /dev/ttyACM0
     serial_baud: 115200
     board_type: mkr_wifi_1010
+    ble_mac: "84:0d:8e:33:8e:8e"
 
   mkr_b:
     hostname: 192.168.8.21       # Bridge RPi B IP
@@ -19,3 +20,4 @@ hosts:
     serial_port: /dev/ttyACM0
     serial_baud: 115200
     board_type: mkr_wifi_1010
+    ble_mac: "84:0d:8e:34:e1:06"

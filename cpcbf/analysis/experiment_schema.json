@@ -62,6 +62,61 @@
       },
       "additionalProperties": true
     },
+    "static_interference": {
+      "type": "object",
+      "description": "Static obstacles between sender and receiver (walls, doors, etc.)",
+      "properties": {
+        "wall_count": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Total number of walls between master and peer"
+        },
+        "walls": {
+          "type": "array",
+          "description": "Per-wall details, ordered from master to peer",
+          "items": {
+            "type": "object",
+            "required": ["material", "thickness_cm", "distance_from_master_m"],
+            "properties": {
+              "material": {
+                "type": "string",
+                "enum": [
+                  "concrete",
+                  "reinforced_concrete",
+                  "brick",
+                  "drywall",
+                  "plasterboard",
+                  "wood",
+                  "glass",
+                  "metal",
+                  "stone",
+                  "other"
+                ],
+                "description": "Primary wall material"
+              },
+              "thickness_cm": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Wall thickness in centimeters"
+              },
+              "distance_from_master_m": {
+                "type": "number",
+                "minimum": 0,
+                "description": "Distance of this wall from the master device in meters"
+              },
+              "notes": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "notes": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": true
+    },
     "devices": {
       "type": "array",
       "items": {

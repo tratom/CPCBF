@@ -114,6 +114,9 @@ def compute_stats_from_record(rec: dict) -> RunStats:
 
         throughput = None
         duration_us = end_us - start_us
+        if duration_us < 0:
+            # 32-bit microsecond timer wraparound
+            duration_us += 2**32
         if duration_us > 0 and packets_rcv > 0:
             overhead = 14 if protocol == "ble" else 42
             wire_bytes = payload_size + overhead
@@ -318,13 +321,22 @@ def print_results(all_stats: list[RunStats]) -> None:
         fmt_f = "{:<10} {:>8} {:>14} {:>14} {:>14} {:>10} {:>8}"
         print(fmt_f.format("Payload", "Samples", "Mean TP", "Std TP", "95% CI", "Loss%", "CRC Err%"))
         print("-" * 95)
+        has_aggregate_only = False
         for _, row in flood_df.sort_values("payload_size").iterrows():
-            mean_s = fmt_throughput(row["throughput_mean_bps"])
-            std_s = fmt_throughput(row["throughput_std_bps"])
-            if row["throughput_ci95_low_bps"] and row["throughput_ci95_high_bps"]:
-                ci_s = f"[{fmt_throughput(row['throughput_ci95_low_bps'])}, {fmt_throughput(row['throughput_ci95_high_bps'])}]"
-            else:
+            mean_bps = row.get("throughput_mean_bps")
+            if mean_bps is None or pd.isna(mean_bps):
+                # Aggregate-only flood (Arduino): no per-chunk stats
+                mean_s = fmt_throughput(row["throughput_bps"]) + "*"
+                std_s = "N/A"
                 ci_s = "N/A"
+                has_aggregate_only = True
+            else:
+                mean_s = fmt_throughput(mean_bps)
+                std_s = fmt_throughput(row["throughput_std_bps"])
+                if row["throughput_ci95_low_bps"] and row["throughput_ci95_high_bps"]:
+                    ci_s = f"[{fmt_throughput(row['throughput_ci95_low_bps'])}, {fmt_throughput(row['throughput_ci95_high_bps'])}]"
+                else:
+                    ci_s = "N/A"
             print(fmt_f.format(
                 f"{int(row['payload_size'])}B",
                 int(row["packets_measured"]),
@@ -334,6 +346,8 @@ def print_results(all_stats: list[RunStats]) -> None:
                 f"{row['packet_loss_pct']:.1f}",
                 f"{row['crc_error_pct']:.1f}",
             ))
+        if has_aggregate_only:
+            print("* = aggregate throughput only (no per-chunk data)")
 
     # ── RSSI Summary ──
     rssi_rows = df[df["rssi_mean"].notna()]

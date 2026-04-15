@@ -162,6 +162,7 @@ erDiagram
         TEXT test_procedure
         TEXT environment_description
         JSONB interference_json
+        JSONB static_interference_json
     }
 
     test_runs {

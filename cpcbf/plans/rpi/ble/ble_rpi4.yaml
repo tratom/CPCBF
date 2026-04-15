@@ -24,7 +24,7 @@ tests:
     protocol: ble
     board: rpi4
     repetitions: 300
-    inter_packet_us: 1000000  # 1000 ms between samples → 5min test (300 packets × 1s pacing + receiver drain)
+    inter_packet_us: 0
     payload_sizes: [32]
 
 # throughput test with no pacing to get max throughput and observe queueing effects at the receiver
@@ -40,8 +40,8 @@ tests:
 # Total dimension of packets on bt 4.2 with 231b payload: 6 (L2CAP CoC header) + 14 (bench header+CRC) + 231 (payload) + 14 (BLE header) = 265b
 
 # total number of packets: 110 (RSSI) + 310 (RTT) + 120000 (flood) = 120420 packets
-# total exec time ~10 minutes (110 packets × 100ms pacing + 300 packets × 1s pacing + 120000 packets × 0ms pacing + receiver drain)
+# total exec time ~5 minutes (110 packets × 100ms pacing + 300 packets × 0s pacing + 120000 packets × 0ms pacing + receiver drain)
 
 # 15 s * 3 for cooldown + 37 s * 3 reconnection time = 156 s ~ 2.5 minutes
 
-# total exec time with cooldowns and reconnections: ~13 minutes
+# total exec time with cooldowns and reconnections: ~8 minutes

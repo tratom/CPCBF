@@ -52,7 +52,7 @@ class Orchestrator:
             return {
                 "iface_name": "",
                 "peer_addr": "",
-                "peer_mac": "",  # ArduinoBLE discovers by service UUID
+                "peer_mac": self.hosts[peer_id].ble_mac,
                 "port": 0,
                 "channel": 0,
                 "essid": "",
@@ -200,27 +200,58 @@ class Orchestrator:
             # BLE: both sides in parallel — peripheral advertises + accepts
             # while central scans + connects. Sequential won't work because
             # accept() on the peripheral blocks until the central connects.
+            # Retry up to 3 times — NINA SPI/HCI can intermittently fail
+            # to discover even on a fresh start.
+            BLE_SETUP_MAX_RETRIES = 3
             setup_cmd = "BLE_SETUP"
-            logger.info("Setting up BLE on both sides in parallel...")
+            ble_setup_ok = False
 
-            def setup_agent(host_id: str) -> dict:
-                return manager.send(
-                    host_id, {"command": setup_cmd}, timeout=90.0
+            for attempt in range(BLE_SETUP_MAX_RETRIES):
+                if attempt > 0:
+                    logger.warning(
+                        "BLE setup attempt %d/%d — retrying after STOP...",
+                        attempt + 1, BLE_SETUP_MAX_RETRIES,
+                    )
+                    for hid in host_ids:
+                        try:
+                            manager.send(hid, {"command": "STOP"}, timeout=5.0)
+                        except Exception:
+                            pass
+                    time.sleep(2)
+
+                logger.info("Setting up BLE on both sides in parallel...")
+
+                def setup_agent(host_id: str) -> dict:
+                    return manager.send(
+                        host_id, {"command": setup_cmd}, timeout=90.0
+                    )
+
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    receiver_future = pool.submit(setup_agent, receiver_id)
+                    time.sleep(2)  # give peripheral time to start advertising
+                    sender_future = pool.submit(setup_agent, sender_id)
+
+                    receiver_resp = receiver_future.result()
+                    sender_resp = sender_future.result()
+
+                if (
+                    receiver_resp.get("status") == "ok"
+                    and sender_resp.get("status") == "ok"
+                ):
+                    ble_setup_ok = True
+                    break
+
+                logger.warning(
+                    "BLE setup failed (attempt %d): receiver=%s sender=%s",
+                    attempt + 1,
+                    receiver_resp.get("status"),
+                    sender_resp.get("status"),
                 )
 
-            with ThreadPoolExecutor(max_workers=2) as pool:
-                receiver_future = pool.submit(setup_agent, receiver_id)
-                time.sleep(2)  # give peripheral time to start advertising
-                sender_future = pool.submit(setup_agent, sender_id)
-
-                receiver_resp = receiver_future.result()
-                sender_resp = sender_future.result()
-
-            if receiver_resp.get("status") != "ok":
-                logger.error("BLE setup failed on receiver (peripheral): %s", receiver_resp)
-                return None
-            if sender_resp.get("status") != "ok":
-                logger.error("BLE setup failed on sender (central): %s", sender_resp)
+            if not ble_setup_ok:
+                logger.error(
+                    "BLE setup failed after %d attempts", BLE_SETUP_MAX_RETRIES
+                )
                 return None
         else:
             # WiFi: sender (GO) first, then receiver (client) — sequential
@@ -304,12 +335,68 @@ class Orchestrator:
         logger.info("Result saved to %s", jsonl_path)
         return jsonl_path
 
+    def _discover_ble_addrs(self, manager: AgentManager) -> None:
+        """Query each MKR-BLE board for its actual NINA BLE address.
+
+        The inventory's ble_mac field is brittle: if the physical boards
+        are swapped between bridge RPis, the static mapping silently
+        becomes wrong and the central tries to direct-connect to its own
+        MAC. Ask the firmware what it sees and overwrite the cached
+        HostInfo so _build_configure_params picks up the truth.
+        """
+        needs_ble = any(
+            t.protocol == "ble" and t.board == "mkr_wifi_1010"
+            for t in self.plan.tests
+        )
+        if not needs_ble:
+            return
+
+        for host_id in manager.host_ids:
+            host = self.hosts[host_id]
+            if getattr(host, "board_type", "") != "mkr_wifi_1010":
+                continue
+            try:
+                resp = manager.send(
+                    host_id, {"command": "GET_BLE_ADDR"}, timeout=15.0
+                )
+            except Exception as exc:
+                logger.warning(
+                    "GET_BLE_ADDR failed on %s (%s) — falling back to inventory %r",
+                    host_id, exc, host.ble_mac,
+                )
+                continue
+            if resp.get("status") != "ok":
+                logger.warning(
+                    "GET_BLE_ADDR error on %s: %s — falling back to inventory %r",
+                    host_id, resp.get("message"), host.ble_mac,
+                )
+                continue
+            discovered = resp.get("data", {}).get("ble_mac", "").lower()
+            if not discovered:
+                logger.warning(
+                    "GET_BLE_ADDR returned no address on %s — "
+                    "falling back to inventory %r",
+                    host_id, host.ble_mac,
+                )
+                continue
+            if host.ble_mac and host.ble_mac.lower() != discovered:
+                logger.warning(
+                    "BLE address mismatch on %s: inventory=%s hardware=%s — "
+                    "using hardware (boards may have been swapped)",
+                    host_id, host.ble_mac, discovered,
+                )
+            else:
+                logger.info("Discovered BLE address on %s: %s", host_id, discovered)
+            host.ble_mac = discovered
+
     def run(self) -> None:
         """Execute all tests in the plan."""
         with AgentManager(self.hosts) as manager:
             # Deploy agent binaries
             for host_id in manager.host_ids:
                 manager.start_agent(host_id)
+
+            self._discover_ble_addrs(manager)
 
             for test in self.plan.tests:
                 for payload_size in test.payload_sizes:
