@@ -9,7 +9,7 @@ build/
 cpcbf/agent/build/
 
 # PlatformIO
-*.pio/
+**.pio/
 
 # Config (local credentials)
 *.conf
