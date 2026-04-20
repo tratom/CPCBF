@@ -1,3 +1,5 @@
+firmware: mkrwifi1010_ble_rssi
+
 global:
   warmup: 10
   timeout_ms: 5000
@@ -7,10 +9,10 @@ global:
   cooldown_s: 15
 
 tests:
-  - name: ble_mkr1010_rtt
-    mode: ping_pong
+  - name: ble_mkr1010_rssi
+    mode: rssi
     protocol: ble
     board: mkr_wifi_1010
     repetitions: 100
-    inter_packet_us: 1000000    # 1s → 5min
-    payload_sizes: [32]
+    inter_packet_us: 100000
+    payload_sizes: [0]

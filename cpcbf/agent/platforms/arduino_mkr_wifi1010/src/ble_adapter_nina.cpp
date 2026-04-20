@@ -34,11 +34,16 @@ struct rx_slot {
  * of callbacks fire before recv() can consume any.  A small ring
  * overflows immediately.  This pool stores variable-size entries
  * (2-byte length + payload) and can hold many more packets:
- *   20-byte payloads → ~818 packets;  230-byte → ~77 packets. */
+ *   20-byte payloads → ~818 packets;  230-byte → ~77 packets.
+ * Compiled out (BLE_RX_POOL_BYTES == 0) for RSSI/RTT firmwares that
+ * never flood — reclaims ~10 KB of BSS on the SAMD21. */
+#if BLE_RX_POOL_BYTES > 0
+#define CPCBF_BLE_HAS_POOL 1
 static uint8_t  rx_pool[BLE_RX_POOL_BYTES];
 static volatile uint16_t rx_pool_wpos;   /* write position (producer/callback) */
 static uint16_t          rx_pool_rpos;   /* read position  (consumer/recv)     */
 static volatile uint16_t rx_pool_count;  /* packets stored */
+#endif
 
 /* Static state — no malloc */
 static struct {
@@ -109,6 +114,7 @@ static volatile uint32_t s_pool_full_count = 0;
 
 /* ---- Pool helpers ---- */
 
+#ifdef CPCBF_BLE_HAS_POOL
 static void pool_reset(void)
 {
     rx_pool_wpos  = 0;
@@ -155,6 +161,16 @@ static bool pool_pop(uint8_t *buf, size_t buf_len, size_t *out_len)
 
     return true;
 }
+#else
+/* No pool compiled in — stubs let callers keep the same shape. */
+static inline void pool_reset(void) {}
+static inline bool pool_empty(void) { return true; }
+static inline bool pool_pop(uint8_t *buf, size_t buf_len, size_t *out_len)
+{
+    (void)buf; (void)buf_len; (void)out_len;
+    return false;
+}
+#endif
 
 /* ---- Characteristic event handlers ---- */
 
@@ -162,7 +178,12 @@ static void on_tx_written(BLEDevice central, BLECharacteristic characteristic)
 {
     (void)central;
     s_callback_count++;
+#ifdef CPCBF_BLE_HAS_POOL
     pool_push(characteristic.value(), characteristic.valueLength());
+#else
+    /* RSSI/RTT firmwares land central→peripheral writes in the ring */
+    ring_push(characteristic.value(), characteristic.valueLength());
+#endif
 }
 
 static void on_rx_notify(BLEDevice peripheral, BLECharacteristic characteristic)
@@ -261,11 +282,13 @@ static int ble_init_peripheral(void)
     s_ble.peer = BLE.central();
     platform_log("ble: central connected: %s", s_ble.peer.address().c_str());
 
-    /* Let the NINA settle after connection: process LE_Connection_Complete
-     * and any LL control PDUs before the test loop starts issuing HCI
-     * Read_RSSI / ATT writes.  Without this, .rssi() on a not-yet-registered
-     * connection handle can block the HCI command channel. */
-    for (int i = 0; i < 10; i++) { BLE.poll(); delay(50); }
+    /* Let the NINA settle after connection: process LE_Connection_Complete,
+     * LE_Connection_Update, and any LL control PDUs before the test loop
+     * starts issuing HCI Read_RSSI / ATT writes. Without this, .rssi() on
+     * a not-yet-registered connection handle can block the HCI command
+     * channel indefinitely — the symptom that turned BLE RSSI/RTT into
+     * 10-minute hangs. 1000 ms covers the slow NINA modules. */
+    for (int i = 0; i < 20; i++) { BLE.poll(); delay(50); }
 
     return ADAPTER_OK;
 }
@@ -512,14 +535,16 @@ static int ble_nina_recv(protocol_adapter_t *self, uint8_t *buf, size_t buf_len,
 
     uint32_t start = millis();
     while ((millis() - start) < timeout_ms) {
+#ifdef CPCBF_BLE_HAS_POOL
         /* Reclaim pool space before the next BLE.poll() burst.
          * pool_pop()'s compaction rarely fires because BLE.poll()
          * refills the pool before the last entry is consumed.
-         * Resetting here guarantees the full 14 KB is available. */
+         * Resetting here guarantees the full pool is available. */
         if (pool_empty()) {
             rx_pool_wpos = 0;
             rx_pool_rpos = 0;
         }
+#endif
 
         BLE.poll();
 
@@ -591,12 +616,17 @@ static int ble_nina_deinit(protocol_adapter_t *self)
         s_ble.initialized = false;
         s_ble.ring_head = 0;
         s_ble.ring_tail = 0;
+#ifdef CPCBF_BLE_HAS_POOL
         platform_log("ble: deinit — callback=%lu push=%lu full=%lu pool=%u/%uB",
                      (unsigned long)s_callback_count,
                      (unsigned long)s_pool_push_count,
                      (unsigned long)s_pool_full_count,
                      (unsigned)rx_pool_wpos,
                      (unsigned)BLE_RX_POOL_BYTES);
+#else
+        platform_log("ble: deinit — callback=%lu (no-pool build)",
+                     (unsigned long)s_callback_count);
+#endif
         s_callback_count = 0;
         s_pool_push_count = 0;
         s_pool_full_count = 0;
@@ -631,6 +661,25 @@ extern "C" void ble_nina_poll(void)
 {
     if (s_ble_stack_active)
         BLE.poll();
+}
+
+/* Issue a throwaway rssi() read and drain its HCI response before the
+ * RSSI test loop starts.  The first Read_RSSI command on a fresh
+ * connection occasionally stalls on the SPI channel if a prior HCI
+ * event is still pending in the NINA.  Absorb that cost once up-front
+ * rather than on the first measured sample. */
+extern "C" void ble_nina_warmup_rssi(void)
+{
+    if (!s_ble.initialized) return;
+    int dummy;
+    if (s_ble.cfg.role == ROLE_RECEIVER) {
+        BLEDevice central = BLE.central();
+        if (central && central.connected()) dummy = central.rssi();
+    } else {
+        if (s_ble.peer.connected()) dummy = s_ble.peer.rssi();
+    }
+    (void)dummy;
+    for (int i = 0; i < 4; i++) { BLE.poll(); delay(25); }
 }
 
 /* Global adapter instance */

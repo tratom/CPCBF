@@ -9,7 +9,7 @@ global:
 
 tests:
 
-# RSSI test with 100ms pacing to get stable RSSI readings without queueing effects
+# # RSSI test with 100ms pacing to get stable RSSI readings without queueing effects
   - name: wifi_mkr1010_rssi
     mode: rssi
     protocol: wifi
@@ -23,7 +23,7 @@ tests:
     mode: ping_pong
     protocol: wifi
     board: mkr_wifi_1010
-    repetitions: 300
+    repetitions: 100
     inter_packet_us: 1000000  # 1000 ms between samples → 5min test (300 packets × 1s pacing + receiver drain)
     payload_sizes: [32]
 
@@ -34,10 +34,10 @@ tests:
     mode: flood
     protocol: wifi
     board: mkr_wifi_1010
-    repetitions: 85000
+    repetitions: 660000
     inter_packet_us: 0
-    payload_sizes: [508, 1432]
+    payload_sizes: [1432]
 
-# total number of packets: 110 (RSSI) + 310 (RTT) + 85000 * 2 (flood) = 170400 packets
+# total number of packets: 110 (RSSI) + 310 (RTT) + 660000 * 2 (flood) = 1320400 packets
 # total exec time ~15 minutes (same as RPi4 plan)
 # 15 s * 3 for cooldown + reconnection time = ~1 minute

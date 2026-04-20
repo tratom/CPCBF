@@ -1,17 +1,19 @@
+firmware: mkrwifi1010_wifi_rssi
+
 global:
-  repetitions: 100
-  warmup: 5
-  timeout_ms: 500
-  inter_packet_us: 500000
+  warmup: 10
+  timeout_ms: 1000
   port: 5201
   channel: 1
   topology: softap
   essid: CPCBF_MKR
-  cooldown_s: 5
+  cooldown_s: 15
 
 tests:
-  - name: wifi_mkr1010_rtt
+  - name: wifi_mkr1010_rssi
     mode: rssi
     protocol: wifi
     board: mkr_wifi_1010
+    repetitions: 100
+    inter_packet_us: 100000
     payload_sizes: [0]

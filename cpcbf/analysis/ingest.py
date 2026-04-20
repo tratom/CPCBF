@@ -181,6 +181,39 @@ def _compute_side_aggregates(side_data: dict) -> dict:
     }
 
 
+def _normalize_agent_chunks(raw_chunks: list[dict]) -> list[dict]:
+    """Coerce agent-emitted chunks into the DB row shape. Empty chunks dropped."""
+    out = []
+    for c in raw_chunks:
+        if not c.get("packet_count"):
+            continue
+        out.append({
+            "chunk_index": int(c["chunk_index"]),
+            "packet_count": int(c["packet_count"]),
+            "start_us": int(c.get("start_us", 0)),
+            "end_us": int(c.get("end_us", 0)),
+            "lost": int(c.get("lost", 0)),
+            "crc_errors": int(c.get("crc_errors", 0)),
+        })
+    return out
+
+
+def _extract_flood_chunks(sender_data: dict, receiver_data: dict) -> list[dict]:
+    """Prefer agent-provided chunks (Arduino paced-flood agg-only) if any
+    side emitted them; fall back to receiver-side packet bucketing (RPi4)."""
+    for side in (receiver_data, sender_data):
+        if not side:
+            continue
+        agent_chunks = side.get("flood_chunks")
+        if agent_chunks:
+            normalized = _normalize_agent_chunks(agent_chunks)
+            if normalized:
+                return normalized
+    if receiver_data:
+        return _compute_flood_chunks(receiver_data)
+    return []
+
+
 def _compute_flood_chunks(receiver_data: dict, n_chunks: int = 5) -> list[dict]:
     """Split measured receiver packets into n_chunks equal-count time slices."""
     packets = receiver_data.get("packets", [])
@@ -416,8 +449,7 @@ def ingest_directory(dir_path: Path, experiment_name: str | None = None) -> int:
         if mode == "flood":
             sender_agg = _compute_side_aggregates(sender_data) if sender_data else {}
             receiver_agg = _compute_side_aggregates(receiver_data) if receiver_data else {}
-            if receiver_data:
-                flood_chunks = _compute_flood_chunks(receiver_data)
+            flood_chunks = _extract_flood_chunks(sender_data, receiver_data)
         else:
             sender_agg = {}
             receiver_agg = {}
@@ -510,8 +542,7 @@ def ingest_jsonl(jsonl_path: str | Path, experiment_name: str | None = None) -> 
             if mode == "flood":
                 sender_agg = _compute_side_aggregates(sender_data) if sender_data else {}
                 receiver_agg = _compute_side_aggregates(receiver_data) if receiver_data else {}
-                if receiver_data:
-                    flood_chunks = _compute_flood_chunks(receiver_data)
+                flood_chunks = _extract_flood_chunks(sender_data, receiver_data)
             else:
                 sender_agg = {}
                 receiver_agg = {}

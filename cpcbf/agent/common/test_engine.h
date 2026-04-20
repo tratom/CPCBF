@@ -43,6 +43,19 @@ typedef struct {
     uint8_t  is_warmup;
 } packet_result_t;
 
+/* Flood / high-throughput 5-slice chunk summary. Populated at agent-side
+ * when per-packet storage isn't available (e.g. Arduino flood with
+ * aggregate_only=1). RPi4 leaves these zero and the controller computes
+ * chunks from per-packet rx_us instead. */
+#define TEST_RESULTS_CHUNK_COUNT 5
+typedef struct {
+    uint32_t packet_count;
+    uint32_t start_us;
+    uint32_t end_us;
+    uint32_t lost;
+    uint32_t crc_errors;
+} flood_chunk_t;
+
 /* Aggregate results */
 typedef struct {
     uint32_t packets_sent;
@@ -55,6 +68,8 @@ typedef struct {
     uint32_t end_us;          /* timestamp of last packet */
     uint8_t  aggregate_only;  /* 1 = no per-packet results stored */
     uint8_t  early_aborted;   /* 1 = test was cut short by consecutive timeouts */
+    uint8_t  chunks_valid;    /* 1 = chunks[] populated by agent */
+    flood_chunk_t chunks[TEST_RESULTS_CHUNK_COUNT];
 #if defined(__cplusplus)
     packet_result_t results[1]; /* C++ compat — allocated via calloc with extra space */
 #else

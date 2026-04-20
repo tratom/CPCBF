@@ -23,6 +23,25 @@ static uint8_t s_results_storage[
 ];
 #endif
 
+/* Per-test build gates. When no CPCBF_TEST_MODE_* is set (host / RPi4),
+ * all three modes are compiled. When a mode flag is set (Arduino per-test
+ * firmwares), only the matching path compiles, shrinking flash and BSS. */
+#if !defined(CPCBF_TEST_MODE_RSSI) && !defined(CPCBF_TEST_MODE_RTT) && !defined(CPCBF_TEST_MODE_FLOOD)
+#define CPCBF_ENABLE_RSSI  1
+#define CPCBF_ENABLE_RTT   1
+#define CPCBF_ENABLE_FLOOD 1
+#else
+#ifdef CPCBF_TEST_MODE_RSSI
+#define CPCBF_ENABLE_RSSI 1
+#endif
+#ifdef CPCBF_TEST_MODE_RTT
+#define CPCBF_ENABLE_RTT 1
+#endif
+#ifdef CPCBF_TEST_MODE_FLOOD
+#define CPCBF_ENABLE_FLOOD 1
+#endif
+#endif
+
 test_results_t *test_results_alloc(uint32_t max_packets)
 {
 #ifdef ARDUINO_PLATFORM
@@ -50,6 +69,36 @@ void test_results_free(test_results_t *r)
 #endif
 }
 
+/* ---- Chunk bookkeeping ---- */
+
+/* Bucket a packet into one of 5 chunks by received-so-far count.
+ * total_expected is the full run length (warmup + repetitions). */
+static inline void chunk_track(test_results_t *res, uint32_t total_expected,
+                               uint32_t ts_us, int lost, int crc_error)
+{
+    if (total_expected == 0) return;
+    uint32_t idx = (res->packets_received * TEST_RESULTS_CHUNK_COUNT) / total_expected;
+    if (idx >= TEST_RESULTS_CHUNK_COUNT) idx = TEST_RESULTS_CHUNK_COUNT - 1;
+    flood_chunk_t *c = &res->chunks[idx];
+    if (c->packet_count == 0) c->start_us = ts_us;
+    c->end_us = ts_us;
+    c->packet_count++;
+    if (lost) c->lost++;
+    if (crc_error) c->crc_errors++;
+}
+
+#if defined(CPCBF_ENABLE_RTT)
+
+/* Drain any buffered packets left over from a previous test. */
+static void drain_rx(protocol_adapter_t *adapter)
+{
+    uint8_t buf[BENCH_MAX_PAYLOAD + BENCH_OVERHEAD];
+    size_t len = 0;
+    while (adapter->recv(adapter, buf, sizeof(buf), &len, 0) == ADAPTER_OK) {
+        len = 0;
+    }
+}
+
 /* ---- Ping-pong sender ---- */
 
 static void run_ping_pong_sender(protocol_adapter_t *adapter,
@@ -61,9 +110,14 @@ static void run_ping_pong_sender(protocol_adapter_t *adapter,
     uint8_t rx_buf[BENCH_MAX_PAYLOAD + BENCH_OVERHEAD];
     bench_packet_t pkt;
     uint32_t consecutive_timeouts = 0;
+    int agg = cfg->aggregate_only;
 
-    platform_log("pp_tx: entry total=%lu timeout_ms=%lu",
-                 (unsigned long)total, (unsigned long)cfg->timeout_ms);
+    platform_log("pp_tx: entry total=%lu timeout_ms=%lu agg=%d",
+                 (unsigned long)total, (unsigned long)cfg->timeout_ms, agg);
+
+    /* Drop stale packets from a previous iteration to avoid the
+     * classic "seq mismatch expected 0 got N" drift. */
+    drain_rx(adapter);
 
     memset(&pkt, 0, sizeof(pkt));
     pkt.msg_type = MSG_PING;
@@ -86,16 +140,22 @@ static void run_ping_pong_sender(protocol_adapter_t *adapter,
         uint32_t tx_us = platform_timestamp_us();
         int rc = adapter->send(adapter, tx_buf, (size_t)enc_len);
         res->packets_sent++;
+        if (i == 0) res->start_us = tx_us;
 
-        packet_result_t *pr = &res->results[res->result_count];
-        pr->seq = pkt.seq_num;
-        pr->tx_us = tx_us;
-        pr->is_warmup = (i < cfg->warmup) ? 1 : 0;
+        packet_result_t *pr = NULL;
+        if (!agg) {
+            pr = &res->results[res->result_count];
+            pr->seq = pkt.seq_num;
+            pr->tx_us = tx_us;
+            pr->is_warmup = (i < cfg->warmup) ? 1 : 0;
+        }
 
         if (rc != ADAPTER_OK) {
-            pr->lost = 1;
+            if (!agg) {
+                pr->lost = 1;
+                res->result_count++;
+            }
             res->packets_lost++;
-            res->result_count++;
             consecutive_timeouts++;
             if (consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
                 platform_log("pp_tx: %lu consecutive send failures, aborting",
@@ -112,9 +172,11 @@ static void run_ping_pong_sender(protocol_adapter_t *adapter,
         uint32_t rx_us = platform_timestamp_us();
 
         if (rc == ADAPTER_ERR_TIMEOUT || rc == ADAPTER_ERR_RECV) {
-            pr->lost = 1;
+            if (!agg) {
+                pr->lost = 1;
+                res->result_count++;
+            }
             res->packets_lost++;
-            res->result_count++;
             consecutive_timeouts++;
             if (consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
                 platform_log("pp_tx: %lu consecutive timeouts, aborting",
@@ -127,15 +189,18 @@ static void run_ping_pong_sender(protocol_adapter_t *adapter,
 
         bench_packet_t rpkt;
         int dec_rc = bench_packet_decode(rx_buf, rx_len, &rpkt);
-        if (dec_rc == -2) {
-            pr->crc_ok = 0;
+        int crc_bad = (dec_rc == -2);
+        if (crc_bad) {
+            if (!agg) pr->crc_ok = 0;
             res->crc_errors++;
         } else if (dec_rc == 0) {
-            pr->crc_ok = 1;
+            if (!agg) pr->crc_ok = 1;
         } else {
-            pr->lost = 1;
+            if (!agg) {
+                pr->lost = 1;
+                res->result_count++;
+            }
             res->packets_lost++;
-            res->result_count++;
             continue;
         }
 
@@ -149,22 +214,35 @@ static void run_ping_pong_sender(protocol_adapter_t *adapter,
                                  &drain_len, 0) == ADAPTER_OK) {
                 drain_len = 0;
             }
-            pr->lost = 1;
+            if (!agg) {
+                pr->lost = 1;
+                res->result_count++;
+            }
             res->packets_lost++;
-            res->result_count++;
             continue;
         }
 
-        pr->rx_us = rx_us;
-        pr->rtt_us = rx_us - tx_us;
+        if (!agg) {
+            pr->rx_us = rx_us;
+            pr->rtt_us = rx_us - tx_us;
+            res->result_count++;
+        }
         res->packets_received++;
+        res->end_us = rx_us;
         consecutive_timeouts = 0;
 
-        res->result_count++;
+        /* Chunk tracking — only populated when we're not storing per-packet
+         * (paced-flood on constrained boards). RPi4 runs agg=0 for RTT so
+         * chunks stay zero and the controller chunks from per-packet rx_us. */
+        if (agg)
+            chunk_track(res, total, rx_us, 0, crc_bad);
 
         if (cfg->inter_packet_us > 0)
             platform_sleep_us(cfg->inter_packet_us);
     }
+
+    if (agg && res->packets_received > 0)
+        res->chunks_valid = 1;
 }
 
 /* ---- Ping-pong receiver ---- */
@@ -177,24 +255,32 @@ static void run_ping_pong_receiver(protocol_adapter_t *adapter,
     uint8_t rx_buf[BENCH_MAX_PAYLOAD + BENCH_OVERHEAD];
     uint8_t tx_buf[BENCH_MAX_PAYLOAD + BENCH_OVERHEAD];
     uint32_t consecutive_timeouts = 0;
+    int agg = cfg->aggregate_only;
 
-    platform_log("pp_rx: entry total=%lu timeout_ms=%lu",
-                 (unsigned long)total, (unsigned long)cfg->timeout_ms);
+    platform_log("pp_rx: entry total=%lu timeout_ms=%lu agg=%d",
+                 (unsigned long)total, (unsigned long)cfg->timeout_ms, agg);
+
+    drain_rx(adapter);
 
     for (uint32_t i = 0; i < total; i++) {
         size_t rx_len = 0;
         int rc = adapter->recv(adapter, rx_buf, sizeof(rx_buf), &rx_len, cfg->timeout_ms);
         uint32_t rx_us = platform_timestamp_us();
 
-        packet_result_t *pr = &res->results[res->result_count];
-        pr->seq = (uint16_t)(i & 0xFFFF);
-        pr->rx_us = rx_us;
-        pr->is_warmup = (i < cfg->warmup) ? 1 : 0;
+        packet_result_t *pr = NULL;
+        if (!agg) {
+            pr = &res->results[res->result_count];
+            pr->seq = (uint16_t)(i & 0xFFFF);
+            pr->rx_us = rx_us;
+            pr->is_warmup = (i < cfg->warmup) ? 1 : 0;
+        }
 
         if (rc == ADAPTER_ERR_TIMEOUT || rc == ADAPTER_ERR_RECV) {
-            pr->lost = 1;
+            if (!agg) {
+                pr->lost = 1;
+                res->result_count++;
+            }
             res->packets_lost++;
-            res->result_count++;
             consecutive_timeouts++;
             if (consecutive_timeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
                 platform_log("pp_rx: %lu consecutive timeouts, aborting",
@@ -207,18 +293,23 @@ static void run_ping_pong_receiver(protocol_adapter_t *adapter,
 
         bench_packet_t pkt;
         int dec_rc = bench_packet_decode(rx_buf, rx_len, &pkt);
-        if (dec_rc == -2) {
-            pr->crc_ok = 0;
+        int crc_bad = (dec_rc == -2);
+        if (crc_bad) {
+            if (!agg) pr->crc_ok = 0;
             res->crc_errors++;
         } else if (dec_rc == 0) {
-            pr->crc_ok = 1;
+            if (!agg) pr->crc_ok = 1;
         } else {
-            pr->lost = 1;
+            if (!agg) {
+                pr->lost = 1;
+                res->result_count++;
+            }
             res->packets_lost++;
-            res->result_count++;
             continue;
         }
 
+        if (res->packets_received == 0) res->start_us = rx_us;
+        res->end_us = rx_us;
         res->packets_received++;
         consecutive_timeouts = 0;
 
@@ -231,10 +322,21 @@ static void run_ping_pong_receiver(protocol_adapter_t *adapter,
             res->packets_sent++;
         }
 
-        pr->tx_us = pkt.timestamp;
-        res->result_count++;
+        if (!agg) {
+            pr->tx_us = pkt.timestamp;
+            res->result_count++;
+        } else {
+            chunk_track(res, total, rx_us, 0, crc_bad);
+        }
     }
+
+    if (agg && res->packets_received > 0)
+        res->chunks_valid = 1;
 }
+
+#endif /* CPCBF_ENABLE_RTT */
+
+#if defined(CPCBF_ENABLE_FLOOD)
 
 /* ---- Flood sender ---- */
 
@@ -325,8 +427,9 @@ static void run_flood_receiver(protocol_adapter_t *adapter,
 
         bench_packet_t pkt;
         int dec_rc = bench_packet_decode(rx_buf, rx_len, &pkt);
+        int crc_bad = (dec_rc == -2);
 
-        if (dec_rc == -2) {
+        if (crc_bad) {
             res->crc_errors++;
         } else if (dec_rc != 0) {
             continue;  /* completely garbled — skip */
@@ -349,12 +452,17 @@ static void run_flood_receiver(protocol_adapter_t *adapter,
             pr->rx_us = rx_us;
             pr->crc_ok = (dec_rc == 0) ? 1 : 0;
             res->result_count++;
+        } else {
+            chunk_track(res, total, rx_us, 0, crc_bad);
         }
     }
 
     /* Count lost packets: total sent (highest_seq+1) minus received */
     if (res->packets_received > 0 && highest_seq + 1 > res->packets_received)
         res->packets_lost = (highest_seq + 1) - res->packets_received;
+
+    if (agg && res->packets_received > 0)
+        res->chunks_valid = 1;
 
     /* Send FLOOD_ACK summary */
     uint8_t tx_buf[BENCH_OVERHEAD];
@@ -368,6 +476,10 @@ static void run_flood_receiver(protocol_adapter_t *adapter,
     if (enc_len > 0)
         adapter->send(adapter, tx_buf, (size_t)enc_len);
 }
+
+#endif /* CPCBF_ENABLE_FLOOD */
+
+#if defined(CPCBF_ENABLE_RSSI)
 
 /* ---- RSSI sampler ---- */
 
@@ -410,6 +522,8 @@ static void run_rssi_sampler(protocol_adapter_t *adapter,
     }
 }
 
+#endif /* CPCBF_ENABLE_RSSI */
+
 /* ---- Public API ---- */
 
 test_results_t *test_engine_run(protocol_adapter_t *adapter,
@@ -428,21 +542,27 @@ test_results_t *test_engine_run(protocol_adapter_t *adapter,
     res->aggregate_only = cfg->aggregate_only;
 
     switch (cfg->mode) {
+#if defined(CPCBF_ENABLE_RTT)
     case TEST_MODE_PING_PONG:
         if (cfg->role == ROLE_SENDER)
             run_ping_pong_sender(adapter, cfg, res);
         else
             run_ping_pong_receiver(adapter, cfg, res);
         break;
+#endif
+#if defined(CPCBF_ENABLE_FLOOD)
     case TEST_MODE_FLOOD:
         if (cfg->role == ROLE_SENDER)
             run_flood_sender(adapter, cfg, res);
         else
             run_flood_receiver(adapter, cfg, res);
         break;
+#endif
+#if defined(CPCBF_ENABLE_RSSI)
     case TEST_MODE_RSSI:
         run_rssi_sampler(adapter, cfg, res);
         break;
+#endif
     default:
         test_results_free(res);
         return NULL;
@@ -459,8 +579,8 @@ char *test_results_to_json(const test_results_t *results,
     if (!results || !cfg)
         return NULL;
 
-    /* Estimate buffer size: ~120 bytes per packet + 512 for metadata */
-    size_t buf_size = 512 + results->result_count * 128;
+    /* Estimate buffer size: ~120 bytes per packet + 1024 for metadata + chunks */
+    size_t buf_size = 1024 + results->result_count * 128;
     char *buf = malloc(buf_size);
     if (!buf)
         return NULL;
@@ -480,8 +600,7 @@ char *test_results_to_json(const test_results_t *results,
         "  \"start_us\": %lu,\n"
         "  \"end_us\": %lu,\n"
         "  \"aggregate_only\": %lu,\n"
-        "  \"early_aborted\": %lu,\n"
-        "  \"packets\": [\n",
+        "  \"early_aborted\": %lu,\n",
         cfg->mode == TEST_MODE_PING_PONG ? "ping_pong" :
         cfg->mode == TEST_MODE_FLOOD     ? "flood"     : "rssi",
         cfg->role == ROLE_SENDER ? "sender" : "receiver",
@@ -496,6 +615,27 @@ char *test_results_to_json(const test_results_t *results,
         (unsigned long)results->end_us,
         (unsigned long)results->aggregate_only,
         (unsigned long)results->early_aborted);
+
+    if (results->chunks_valid) {
+        off += snprintf(buf + off, buf_size - off, "  \"flood_chunks\": [\n");
+        for (uint32_t i = 0; i < TEST_RESULTS_CHUNK_COUNT; i++) {
+            const flood_chunk_t *c = &results->chunks[i];
+            off += snprintf(buf + off, buf_size - off,
+                "    {\"chunk_index\": %lu, \"packet_count\": %lu, "
+                "\"start_us\": %lu, \"end_us\": %lu, "
+                "\"lost\": %lu, \"crc_errors\": %lu}%s\n",
+                (unsigned long)i,
+                (unsigned long)c->packet_count,
+                (unsigned long)c->start_us,
+                (unsigned long)c->end_us,
+                (unsigned long)c->lost,
+                (unsigned long)c->crc_errors,
+                (i + 1 < TEST_RESULTS_CHUNK_COUNT) ? "," : "");
+        }
+        off += snprintf(buf + off, buf_size - off, "  ],\n");
+    }
+
+    off += snprintf(buf + off, buf_size - off, "  \"packets\": [\n");
 
     for (uint32_t i = 0; i < results->result_count; i++) {
         const packet_result_t *p = &results->results[i];

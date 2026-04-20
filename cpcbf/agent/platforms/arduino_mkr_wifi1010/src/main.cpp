@@ -33,6 +33,7 @@ extern "C" void ble_nina_shutdown(void);
 extern "C" void ble_nina_poll(void);
 extern "C" int ble_nina_ensure_stack(void);
 extern "C" const char *ble_nina_local_addr(void);
+extern "C" void ble_nina_warmup_rssi(void);
 #endif
 
 /* Agent state */
@@ -147,6 +148,22 @@ static void handle_configure(JsonObject params)
 
     /* Flood mode: aggregate-only to handle millions of packets without SRAM */
     g_test_cfg.aggregate_only = (g_test_cfg.mode == TEST_MODE_FLOOD) ? 1 : 0;
+
+#if defined(CPCBF_PROTOCOL_BLE) && !defined(CPCBF_TEST_MODE_FLOOD)
+    /* BLE flood firmware doesn't compile run_flood_*: ArduinoBLE GATT
+     * has no L2CAP flow control, so unpaced writes always drop at the
+     * NINA queue. Run flood as synchronous ping-pong at max payload —
+     * the wire work is identical (each round-trip = 2 packets on air),
+     * naturally paced, and chunks still come through via the ping-pong
+     * agg-only path in test_engine.c. */
+    if (g_test_cfg.mode == TEST_MODE_FLOOD) {
+        g_test_cfg.mode = TEST_MODE_PING_PONG;
+        g_test_cfg.aggregate_only = 1;
+        g_test_cfg.payload_size = BENCH_MAX_PAYLOAD;
+        platform_log("cfg: BLE flood → ping-pong (payload=%u, agg=1)",
+                     (unsigned)BENCH_MAX_PAYLOAD);
+    }
+#endif
 
     g_configured = 1;
     send_ok("configured");
@@ -279,6 +296,13 @@ static void handle_start()
                  (unsigned long)g_test_cfg.payload_size,
                  (unsigned long)g_test_cfg.repetitions);
 
+#ifdef CPCBF_PROTOCOL_BLE
+    /* Absorb the one-time Read_RSSI stall so the first measured sample
+     * isn't corrupted.  Cheap (~100 ms) and idempotent. */
+    if (g_test_cfg.mode == TEST_MODE_RSSI)
+        ble_nina_warmup_rssi();
+#endif
+
     g_results = test_engine_run(g_active_adapter, &g_test_cfg);
 
     if (g_results)
@@ -323,6 +347,28 @@ static void handle_get_results()
     Serial.print("\"end_us\":"); Serial.print(g_results->end_us); Serial.print(",");
     Serial.print("\"aggregate_only\":"); Serial.print(g_results->aggregate_only); Serial.print(",");
     Serial.print("\"early_aborted\":"); Serial.print(g_results->early_aborted); Serial.print(",");
+
+    if (g_results->chunks_valid) {
+        Serial.print("\"flood_chunks\":[");
+        for (uint32_t ci = 0; ci < TEST_RESULTS_CHUNK_COUNT; ci++) {
+            const flood_chunk_t *c = &g_results->chunks[ci];
+            char cbuf[160];
+            int cn = snprintf(cbuf, sizeof(cbuf),
+                "%s{\"chunk_index\":%lu,\"packet_count\":%lu,"
+                "\"start_us\":%lu,\"end_us\":%lu,"
+                "\"lost\":%lu,\"crc_errors\":%lu}",
+                ci > 0 ? "," : "",
+                (unsigned long)ci,
+                (unsigned long)c->packet_count,
+                (unsigned long)c->start_us,
+                (unsigned long)c->end_us,
+                (unsigned long)c->lost,
+                (unsigned long)c->crc_errors);
+            Serial.write(cbuf, cn);
+        }
+        Serial.print("],");
+    }
+
     Serial.print("\"packets\":[");
 
     char buf[160];

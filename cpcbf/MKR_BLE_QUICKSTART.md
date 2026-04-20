@@ -10,18 +10,30 @@
 - Python 3.10+ with `pyserial` on the bridge RPis (`pip install pyserial`)
 - NINA firmware >= 1.2.0 (see Troubleshooting below)
 
-## 1. Flash BLE firmware
+## 1. Flash the per-test firmware
+
+The MKR WiFi 1010 has only 32 KB of SRAM, so each BLE test (RSSI / RTT /
+flood) ships as its own firmware — memory-tuned to the buffers that test
+actually needs. Flash the env that matches the plan you want to run.
+
+| Plan                                           | PlatformIO env          |
+|------------------------------------------------|-------------------------|
+| `plans/arduino/ble/ble_mkr1010_rssi.yaml`      | `mkrwifi1010_ble_rssi`  |
+| `plans/arduino/ble/ble_mkr1010_rtt.yaml`       | `mkrwifi1010_ble_rtt`   |
+| `plans/arduino/ble/ble_mkr1010_flood.yaml`     | `mkrwifi1010_ble_flood` |
+
+Each plan YAML also lists its env in a top-level `firmware:` field — re-check
+there if you're unsure.
 
 ```bash
 cd cpcbf/agent/platforms/arduino_mkr_wifi1010
-pio run -e mkrwifi1010_ble -t upload --upload-port /dev/ttyACM0
+pio run -e mkrwifi1010_ble_rssi -t upload --upload-port /dev/ttyACM0
 ```
 
 Repeat for the second Arduino (connect to the second RPi or your workstation).
 
-**Note:** The BLE firmware is separate from the WiFi firmware. To switch between
-WiFi and BLE tests, re-flash the appropriate firmware (`-e mkrwifi1010_wifi` or
-`-e mkrwifi1010_ble`).
+Switching between WiFi and BLE, or between test modes, requires re-flashing
+the matching firmware.
 
 ## 2. Verify serial communication
 
@@ -38,15 +50,21 @@ screen /dev/ttyACM0 115200
 Edit `cpcbf/inventory/inventory-lab-mkr.yaml` — same inventory file as WiFi tests.
 No BLE-specific inventory fields needed (ArduinoBLE discovers peers by service UUID).
 
-## 4. Run smoke test
+## 4. Run a test
 
-From your workstation:
+From your workstation, pick the plan that matches the firmware currently
+flashed on both boards:
 
 ```bash
 cd cpcbf
 pip install -e .
-cpcbf plans/arduino/ble/ble_mkr1010_quick_smoke.yaml -i inventory/inventory-lab-mkr.yaml -o ./results_ble -v
+cpcbf plans/arduino/ble/ble_mkr1010_rssi.yaml  -i inventory/inventory-lab-mkr.yaml -o ./results_ble -v
+cpcbf plans/arduino/ble/ble_mkr1010_rtt.yaml   -i inventory/inventory-lab-mkr.yaml -o ./results_ble -v
+cpcbf plans/arduino/ble/ble_mkr1010_flood.yaml -i inventory/inventory-lab-mkr.yaml -o ./results_ble -v
 ```
+
+To run all three: flash `ble_rssi` → run RSSI plan → flash `ble_rtt` → run
+RTT plan → flash `ble_flood` → run flood plan.
 
 ## BLE topology
 
@@ -56,11 +74,31 @@ cpcbf plans/arduino/ble/ble_mkr1010_quick_smoke.yaml -i inventory/inventory-lab-
   - TX characteristic: central writes data to peripheral
   - RX characteristic: peripheral notifies data to central
 
+## Flood-as-ping-pong
+
+ArduinoBLE GATT has no L2CAP flow control, so unpaced writes silently drop
+at the NINA queue. The `ble_flood` firmware therefore translates `mode:
+flood` into synchronous ping-pong at max payload (230 B) at runtime —
+each round-trip puts 2 packets on the air, naturally paced by the
+acknowledgement. The plan's `repetitions` field is the number of round-trips
+(half the equivalent one-way budget).
+
+5-chunk throughput stats are produced agent-side and land in the same
+`flood_chunks` DB table as the RPi4 and WiFi runs.
+
 ## Constraints
 
-- Max payload: 230 bytes (ATT_MTU 244 - 14 byte benchmark header)
-- Max stored results: 500 entries per test run
-- BLE and WiFi cannot run in the same firmware (separate builds required)
+- Max payload: 230 bytes (ATT_MTU 244 − 14 B benchmark header), negotiated
+  via DLE 251-byte LL PDU.
+- Per-test static results cap (set in `platformio.ini` via `CPCBF_STATIC_RESULTS_MAX`):
+  - `ble_rssi`: 110 slots
+  - `ble_rtt`: 320 slots (covers 10 warmup + 300 measured)
+  - `ble_flood`: 8 slots (aggregate-only + 5 chunks)
+- BLE RX pool / ring sizing is also per-env:
+  - RSSI firmware: no pool, tiny ring (4 slots)
+  - RTT firmware: no pool, full ring (16 slots)
+  - Flood firmware: no pool (ping-pong doesn't burst), full ring
+- BLE and WiFi cannot run in the same firmware (separate builds required).
 
 ## Troubleshooting
 
@@ -99,3 +137,11 @@ discover GATT services. Possible causes:
 1. Boards too far apart — move within 1 meter for initial testing
 2. NINA firmware version too old — update as described above
 3. Stale BLE state — reset both boards and retry
+
+### RSSI / RTT hang for ~10 min, then time out
+
+Fixed in the split-firmware rebuild: the peripheral HCI flush now runs for
+1000 ms (up from 500 ms) after connection, and the RSSI mode runs one
+throwaway `central.rssi()` call on entry to absorb the one-time Read_RSSI
+stall. If the symptom returns, re-check that you flashed the `ble_rssi` /
+`ble_rtt` firmware (not a stale combined build).
