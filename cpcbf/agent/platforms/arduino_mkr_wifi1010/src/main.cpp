@@ -34,6 +34,9 @@ extern "C" void ble_nina_poll(void);
 extern "C" int ble_nina_ensure_stack(void);
 extern "C" const char *ble_nina_local_addr(void);
 extern "C" void ble_nina_warmup_rssi(void);
+extern "C" uint32_t ble_nina_diag_callback_count(void);
+extern "C" uint32_t ble_nina_diag_pool_push_count(void);
+extern "C" uint32_t ble_nina_diag_pool_full_count(void);
 #endif
 
 /* Agent state */
@@ -148,22 +151,6 @@ static void handle_configure(JsonObject params)
 
     /* Flood mode: aggregate-only to handle millions of packets without SRAM */
     g_test_cfg.aggregate_only = (g_test_cfg.mode == TEST_MODE_FLOOD) ? 1 : 0;
-
-#if defined(CPCBF_PROTOCOL_BLE) && !defined(CPCBF_TEST_MODE_FLOOD)
-    /* BLE flood firmware doesn't compile run_flood_*: ArduinoBLE GATT
-     * has no L2CAP flow control, so unpaced writes always drop at the
-     * NINA queue. Run flood as synchronous ping-pong at max payload —
-     * the wire work is identical (each round-trip = 2 packets on air),
-     * naturally paced, and chunks still come through via the ping-pong
-     * agg-only path in test_engine.c. */
-    if (g_test_cfg.mode == TEST_MODE_FLOOD) {
-        g_test_cfg.mode = TEST_MODE_PING_PONG;
-        g_test_cfg.aggregate_only = 1;
-        g_test_cfg.payload_size = BENCH_MAX_PAYLOAD;
-        platform_log("cfg: BLE flood → ping-pong (payload=%u, agg=1)",
-                     (unsigned)BENCH_MAX_PAYLOAD);
-    }
-#endif
 
     g_configured = 1;
     send_ok("configured");
@@ -299,11 +286,16 @@ static void handle_start()
 #ifdef CPCBF_PROTOCOL_BLE
     /* Absorb the one-time Read_RSSI stall so the first measured sample
      * isn't corrupted.  Cheap (~100 ms) and idempotent. */
-    if (g_test_cfg.mode == TEST_MODE_RSSI)
+    if (g_test_cfg.mode == TEST_MODE_RSSI) {
+        platform_log("rssi: warmup pre");
         ble_nina_warmup_rssi();
+        platform_log("rssi: warmup post");
+    }
 #endif
 
+    platform_log("test_engine_run: pre");
     g_results = test_engine_run(g_active_adapter, &g_test_cfg);
+    platform_log("test_engine_run: post results=%p", (void*)g_results);
 
     if (g_results)
         send_ok("test complete");
@@ -347,6 +339,14 @@ static void handle_get_results()
     Serial.print("\"end_us\":"); Serial.print(g_results->end_us); Serial.print(",");
     Serial.print("\"aggregate_only\":"); Serial.print(g_results->aggregate_only); Serial.print(",");
     Serial.print("\"early_aborted\":"); Serial.print(g_results->early_aborted); Serial.print(",");
+
+#ifdef CPCBF_PROTOCOL_BLE
+    Serial.print("\"ble_diag\":{");
+    Serial.print("\"callbacks\":"); Serial.print(ble_nina_diag_callback_count()); Serial.print(",");
+    Serial.print("\"pool_pushes\":"); Serial.print(ble_nina_diag_pool_push_count()); Serial.print(",");
+    Serial.print("\"pool_full_drops\":"); Serial.print(ble_nina_diag_pool_full_count());
+    Serial.print("},");
+#endif
 
     if (g_results->chunks_valid) {
         Serial.print("\"flood_chunks\":[");

@@ -18,9 +18,13 @@
 #define CPCBF_STATIC_RESULTS_MAX 120
 #endif
 
+/* 4-byte alignment required: s_results_storage is cast to test_results_t*,
+ * whose uint32_t fields will hardfault on Cortex-M0+ if unaligned. BSS layout
+ * is non-deterministic across builds (the BLE-RSSI firmware happened to land
+ * the buffer at a 1-aligned address, causing run_* dispatch to wedge). */
 static uint8_t s_results_storage[
     sizeof(test_results_t) + CPCBF_STATIC_RESULTS_MAX * sizeof(packet_result_t)
-];
+] __attribute__((aligned(4)));
 #endif
 
 /* Per-test build gates. When no CPCBF_TEST_MODE_* is set (host / RPi4),
@@ -231,6 +235,15 @@ static void run_ping_pong_sender(protocol_adapter_t *adapter,
         res->end_us = rx_us;
         consecutive_timeouts = 0;
 
+        /* Progress breadcrumb every 50 iters so long RTT runs leave
+         * diagnosable traces even without the per-packet JSON. */
+        if ((i + 1) % 50 == 0) {
+            platform_log("pp_tx: iter %lu/%lu rx=%lu lost=%lu",
+                         (unsigned long)(i + 1), (unsigned long)total,
+                         (unsigned long)res->packets_received,
+                         (unsigned long)res->packets_lost);
+        }
+
         /* Chunk tracking — only populated when we're not storing per-packet
          * (paced-flood on constrained boards). RPi4 runs agg=0 for RTT so
          * chunks stay zero and the controller chunks from per-packet rx_us. */
@@ -313,6 +326,13 @@ static void run_ping_pong_receiver(protocol_adapter_t *adapter,
         res->packets_received++;
         consecutive_timeouts = 0;
 
+        if ((i + 1) % 50 == 0) {
+            platform_log("pp_rx: iter %lu/%lu rx=%lu lost=%lu",
+                         (unsigned long)(i + 1), (unsigned long)total,
+                         (unsigned long)res->packets_received,
+                         (unsigned long)res->packets_lost);
+        }
+
         /* Build and send PONG */
         pkt.msg_type = MSG_PONG;
         pkt.timestamp = platform_timestamp_us();
@@ -348,6 +368,10 @@ static void run_flood_sender(protocol_adapter_t *adapter,
     uint8_t tx_buf[BENCH_MAX_PAYLOAD + BENCH_OVERHEAD];
     bench_packet_t pkt;
     int agg = cfg->aggregate_only;
+    uint32_t consecutive_send_failures = 0;
+
+    platform_log("flood_tx: entry total=%lu ipi_us=%lu agg=%d",
+                 (unsigned long)total, (unsigned long)cfg->inter_packet_us, agg);
 
     memset(&pkt, 0, sizeof(pkt));
     pkt.msg_type = MSG_FLOOD;
@@ -371,8 +395,27 @@ static void run_flood_sender(protocol_adapter_t *adapter,
             res->start_us = tx_us;
         res->end_us = tx_us;
 
-        if (rc != ADAPTER_OK)
+        if (rc != ADAPTER_OK) {
             res->packets_lost++;
+            consecutive_send_failures++;
+            if (consecutive_send_failures >= MAX_CONSECUTIVE_TIMEOUTS) {
+                platform_log("flood_tx: %lu consecutive send failures at iter %lu, aborting",
+                             (unsigned long)consecutive_send_failures,
+                             (unsigned long)i);
+                res->early_aborted = 1;
+                if (!agg) {
+                    packet_result_t *pr = &res->results[res->result_count];
+                    pr->seq = pkt.seq_num;
+                    pr->tx_us = tx_us;
+                    pr->is_warmup = (i < cfg->warmup) ? 1 : 0;
+                    pr->lost = 1;
+                    res->result_count++;
+                }
+                break;
+            }
+        } else {
+            consecutive_send_failures = 0;
+        }
 
         if (!agg) {
             packet_result_t *pr = &res->results[res->result_count];
@@ -381,6 +424,14 @@ static void run_flood_sender(protocol_adapter_t *adapter,
             pr->is_warmup = (i < cfg->warmup) ? 1 : 0;
             pr->lost = (rc != ADAPTER_OK) ? 1 : 0;
             res->result_count++;
+        }
+
+        /* Progress breadcrumb every 1000 iters — flood runs can be 100 k+ packets. */
+        if ((i + 1) % 1000 == 0) {
+            platform_log("flood_tx: iter %lu/%lu sent=%lu lost=%lu",
+                         (unsigned long)(i + 1), (unsigned long)total,
+                         (unsigned long)res->packets_sent,
+                         (unsigned long)res->packets_lost);
         }
 
         if (cfg->inter_packet_us > 0)
@@ -399,6 +450,9 @@ static void run_flood_receiver(protocol_adapter_t *adapter,
     uint32_t consecutive_timeouts = 0;
     uint32_t highest_seq = 0;
     int agg = cfg->aggregate_only;
+
+    platform_log("flood_rx: entry total=%lu agg=%d timeout_ms=%lu",
+                 (unsigned long)total, agg, (unsigned long)cfg->timeout_ms);
 
     /*
      * Drain approach: receive packets until we get several consecutive
@@ -441,6 +495,15 @@ static void run_flood_receiver(protocol_adapter_t *adapter,
         res->end_us = rx_us;
 
         res->packets_received++;
+
+        /* Progress breadcrumb every 50 received packets — dense enough
+         * to catch stalls on small test runs. */
+        if (res->packets_received % 50 == 0) {
+            platform_log("flood_rx: recv=%lu crc=%lu us=%lu",
+                         (unsigned long)res->packets_received,
+                         (unsigned long)res->crc_errors,
+                         (unsigned long)platform_timestamp_us());
+        }
 
         if (pkt.seq_num > highest_seq)
             highest_seq = pkt.seq_num;
@@ -492,14 +555,28 @@ static void run_rssi_sampler(protocol_adapter_t *adapter,
     if (interval_ms == 0) interval_ms = 100;  /* default 100ms between samples */
     uint32_t consecutive_failures = 0;
 
+    platform_log("rssi: entry total=%lu interval_ms=%lu role=%d",
+                 (unsigned long)total, (unsigned long)interval_ms, (int)cfg->role);
+
     for (uint32_t i = 0; i < total; i++) {
         packet_result_t *pr = &res->results[res->result_count];
         pr->seq = (uint16_t)(i & 0xFFFF);
         pr->is_warmup = (i < cfg->warmup) ? 1 : 0;
         pr->rx_us = platform_timestamp_us();
 
+        if (i < 3) {
+            platform_log("rssi: iter %lu pre-get-rssi", (unsigned long)i);
+        }
+
         int rssi;
-        if (adapter->get_rssi(adapter, &rssi) == ADAPTER_OK) {
+        int rc = adapter->get_rssi(adapter, &rssi);
+
+        if (i < 3) {
+            platform_log("rssi: iter %lu post-get-rssi rc=%d rssi=%d",
+                         (unsigned long)i, rc, rssi);
+        }
+
+        if (rc == ADAPTER_OK) {
             pr->rssi = rssi;
             pr->crc_ok = 1;  /* no payload to validate — mark as OK */
             res->packets_received++;
@@ -518,6 +595,13 @@ static void run_rssi_sampler(protocol_adapter_t *adapter,
         }
         res->result_count++;
 
+        if ((i + 1) % 10 == 0) {
+            platform_log("rssi: progress iter=%lu recv=%lu lost=%lu",
+                         (unsigned long)(i + 1),
+                         (unsigned long)res->packets_received,
+                         (unsigned long)res->packets_lost);
+        }
+
         platform_sleep_ms(interval_ms);
     }
 }
@@ -534,12 +618,17 @@ test_results_t *test_engine_run(protocol_adapter_t *adapter,
 
     uint32_t total = cfg->warmup + cfg->repetitions;
     uint32_t alloc_count = cfg->aggregate_only ? 0 : total;
+    platform_log("engine: pre-alloc total=%lu agg=%d",
+                 (unsigned long)total, (int)cfg->aggregate_only);
     test_results_t *res = test_results_alloc(alloc_count);
+    platform_log("engine: post-alloc res=%p", (void*)res);
     if (!res)
         return NULL;
 
     res->warmup_count = cfg->warmup;
     res->aggregate_only = cfg->aggregate_only;
+
+    platform_log("engine: dispatch mode=%d", (int)cfg->mode);
 
     switch (cfg->mode) {
 #if defined(CPCBF_ENABLE_RTT)
@@ -560,10 +649,13 @@ test_results_t *test_engine_run(protocol_adapter_t *adapter,
 #endif
 #if defined(CPCBF_ENABLE_RSSI)
     case TEST_MODE_RSSI:
+        platform_log("engine: calling run_rssi_sampler");
         run_rssi_sampler(adapter, cfg, res);
+        platform_log("engine: run_rssi_sampler returned");
         break;
 #endif
     default:
+        platform_log("engine: default branch (mode=%d), freeing", (int)cfg->mode);
         test_results_free(res);
         return NULL;
     }

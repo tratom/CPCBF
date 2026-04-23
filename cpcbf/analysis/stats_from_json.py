@@ -88,7 +88,9 @@ def compute_stats_from_record(rec: dict) -> RunStats:
     mode = rec.get("mode", "unknown")
     protocol = rec.get("protocol", "wifi")
     payload_size = rec.get("payload_size", 0)
-    early_aborted = bool(rec.get("early_aborted", 0))
+    # early_aborted lives on the side sub-objects (sender/receiver), not top-level
+    early_aborted = bool(rec.get("receiver", {}).get("early_aborted", 0)) \
+                    or bool(rec.get("sender", {}).get("early_aborted", 0))
 
     # Source selection: ping_pong → sender (has RTT), rssi → receiver, flood → receiver
     if mode == "ping_pong":
@@ -112,16 +114,38 @@ def compute_stats_from_record(rec: dict) -> RunStats:
         packet_loss_pct = ((packets_sent - packets_rcv) / packets_sent * 100) if packets_sent > 0 else 0.0
         crc_error_pct = (crc_errs / packets_rcv * 100) if packets_rcv > 0 else 0.0
 
+        overhead = 14 if protocol == "ble" else 42
+        wire_bytes = payload_size + overhead
+
         throughput = None
         duration_us = end_us - start_us
         if duration_us < 0:
             # 32-bit microsecond timer wraparound
             duration_us += 2**32
         if duration_us > 0 and packets_rcv > 0:
-            overhead = 14 if protocol == "ble" else 42
-            wire_bytes = payload_size + overhead
             total_bits = packets_rcv * wire_bytes * 8
             throughput = total_bits / (duration_us / 1e6)
+
+        # Agent-provided per-chunk summaries (e.g. MKR flood with aggregate_only=1).
+        tp_mean = tp_std = tp_ci_low = tp_ci_high = None
+        agent_chunks = receiver_data.get("flood_chunks") or sender_data.get("flood_chunks")
+        if agent_chunks:
+            chunk_tps = []
+            for c in agent_chunks:
+                pc = c.get("packet_count", 0)
+                if pc < 2:
+                    continue
+                dur = c.get("end_us", 0) - c.get("start_us", 0)
+                if dur < 0:
+                    dur += 2**32
+                if dur > 0:
+                    chunk_tps.append(pc * wire_bytes * 8 / (dur / 1e6))
+            if len(chunk_tps) >= 2:
+                arr = np.array(chunk_tps)
+                tp_mean = float(np.mean(arr))
+                tp_std = float(np.std(arr, ddof=1))
+                ci = sp_stats.t.interval(0.95, len(arr) - 1, loc=tp_mean, scale=sp_stats.sem(arr))
+                tp_ci_low, tp_ci_high = float(ci[0]), float(ci[1])
 
         return RunStats(
             test_name=test_name,
@@ -137,10 +161,10 @@ def compute_stats_from_record(rec: dict) -> RunStats:
             crc_error_pct=crc_error_pct,
             jitter_us=None, rssi_mean=None, rssi_std=None,
             throughput_bps=throughput,
-            throughput_mean_bps=None,
-            throughput_std_bps=None,
-            throughput_ci95_low_bps=None,
-            throughput_ci95_high_bps=None,
+            throughput_mean_bps=tp_mean,
+            throughput_std_bps=tp_std,
+            throughput_ci95_low_bps=tp_ci_low,
+            throughput_ci95_high_bps=tp_ci_high,
         )
 
     # Per-packet analysis path (original)
@@ -322,9 +346,20 @@ def print_results(all_stats: list[RunStats]) -> None:
         print(fmt_f.format("Payload", "Samples", "Mean TP", "Std TP", "95% CI", "Loss%", "CRC Err%"))
         print("-" * 95)
         has_aggregate_only = False
+        has_aborted = False
         for _, row in flood_df.sort_values("payload_size").iterrows():
             mean_bps = row.get("throughput_mean_bps")
-            if mean_bps is None or pd.isna(mean_bps):
+            aborted = bool(row.get("early_aborted"))
+            if aborted:
+                # Run ended on timeout burst — throughput over end_us-start_us
+                # covers only the burst window, not the true test duration.
+                # Reporting a number here is misleading (e.g. 10 Mbps from an
+                # 11 ms burst on a 70-s run). Flag it instead.
+                mean_s = "ABORTED†"
+                std_s = "N/A"
+                ci_s = "N/A"
+                has_aborted = True
+            elif mean_bps is None or pd.isna(mean_bps):
                 # Aggregate-only flood (Arduino): no per-chunk stats
                 mean_s = fmt_throughput(row["throughput_bps"]) + "*"
                 std_s = "N/A"
@@ -348,6 +383,9 @@ def print_results(all_stats: list[RunStats]) -> None:
             ))
         if has_aggregate_only:
             print("* = aggregate throughput only (no per-chunk data)")
+        if has_aborted:
+            print("† = run aborted early (receiver hit MAX_CONSECUTIVE_TIMEOUTS); "
+                  "throughput suppressed as the recv window only covers the initial burst")
 
     # ── RSSI Summary ──
     rssi_rows = df[df["rssi_mean"].notna()]

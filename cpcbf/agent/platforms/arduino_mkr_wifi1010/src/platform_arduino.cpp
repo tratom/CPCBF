@@ -42,7 +42,15 @@ extern "C" void platform_sleep_ms(uint32_t ms)
 
 extern "C" void platform_sleep_us(uint32_t us)
 {
-    delayMicroseconds(us);
+    /* Arduino's delayMicroseconds() is only accurate up to 16383 µs — larger
+     * values overflow its internal cycle counter and return nearly instantly.
+     * Split into the ms part (reliable delay()) and the sub-ms remainder. */
+    if (us >= 1000) {
+        delay(us / 1000);
+        us %= 1000;
+    }
+    if (us > 0)
+        delayMicroseconds(us);
 }
 
 extern "C" int platform_radio_disable(const char *subsystem)

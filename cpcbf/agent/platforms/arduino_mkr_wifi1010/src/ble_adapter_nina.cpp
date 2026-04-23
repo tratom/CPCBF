@@ -29,20 +29,26 @@ struct rx_slot {
     size_t  len;
 };
 
-/* Linear byte pool for flood bursts.
+/* Circular byte pool for flood bursts.
  * BLE.poll() delivers ALL buffered NINA packets in one call — hundreds
- * of callbacks fire before recv() can consume any.  A small ring
- * overflows immediately.  This pool stores variable-size entries
- * (2-byte length + payload) and can hold many more packets:
- *   20-byte payloads → ~818 packets;  230-byte → ~77 packets.
+ * of callbacks fire before recv() can consume any.  Entries are variable
+ * size (2-byte length prefix + payload) and wpos/rpos wrap around the
+ * buffer so free space behind the reader is reused without requiring a
+ * full drain (the old linear layout stranded that space, causing all
+ * pushes to drop once wpos reached the tail even if the buffer was
+ * mostly free — confirmed via pool_full_drops counter).
+ * Capacity (14 KB):
+ *   20-byte payloads  → ~636 packets
+ *   230-byte payloads →  ~60 packets
  * Compiled out (BLE_RX_POOL_BYTES == 0) for RSSI/RTT firmwares that
  * never flood — reclaims ~10 KB of BSS on the SAMD21. */
 #if BLE_RX_POOL_BYTES > 0
 #define CPCBF_BLE_HAS_POOL 1
 static uint8_t  rx_pool[BLE_RX_POOL_BYTES];
-static volatile uint16_t rx_pool_wpos;   /* write position (producer/callback) */
-static uint16_t          rx_pool_rpos;   /* read position  (consumer/recv)     */
-static volatile uint16_t rx_pool_count;  /* packets stored */
+static volatile uint16_t rx_pool_wpos;   /* next write offset (producer) */
+static uint16_t          rx_pool_rpos;   /* next read  offset (consumer) */
+static volatile uint16_t rx_pool_used;   /* bytes currently occupied     */
+static volatile uint16_t rx_pool_count;  /* packets stored               */
 #endif
 
 /* Static state — no malloc */
@@ -112,13 +118,42 @@ static volatile uint32_t s_callback_count = 0;
 static volatile uint32_t s_pool_push_count = 0;
 static volatile uint32_t s_pool_full_count = 0;
 
+extern "C" uint32_t ble_nina_diag_callback_count(void)  { return s_callback_count; }
+extern "C" uint32_t ble_nina_diag_pool_push_count(void) { return s_pool_push_count; }
+extern "C" uint32_t ble_nina_diag_pool_full_count(void) { return s_pool_full_count; }
+
 /* ---- Pool helpers ---- */
 
 #ifdef CPCBF_BLE_HAS_POOL
+/* Copy `n` bytes into the pool starting at `pos`, wrapping at BLE_RX_POOL_BYTES. */
+static inline void pool_ring_write(uint16_t pos, const void *src, uint16_t n)
+{
+    uint16_t first = BLE_RX_POOL_BYTES - pos;
+    if (first >= n) {
+        memcpy(&rx_pool[pos], src, n);
+    } else {
+        memcpy(&rx_pool[pos], src, first);
+        memcpy(&rx_pool[0], (const uint8_t *)src + first, n - first);
+    }
+}
+
+/* Copy `n` bytes out of the pool starting at `pos`, wrapping at BLE_RX_POOL_BYTES. */
+static inline void pool_ring_read(uint16_t pos, void *dst, uint16_t n)
+{
+    uint16_t first = BLE_RX_POOL_BYTES - pos;
+    if (first >= n) {
+        memcpy(dst, &rx_pool[pos], n);
+    } else {
+        memcpy(dst, &rx_pool[pos], first);
+        memcpy((uint8_t *)dst + first, &rx_pool[0], n - first);
+    }
+}
+
 static void pool_reset(void)
 {
     rx_pool_wpos  = 0;
     rx_pool_rpos  = 0;
+    rx_pool_used  = 0;
     rx_pool_count = 0;
 }
 
@@ -126,39 +161,66 @@ static void pool_push(const uint8_t *data, size_t len)
 {
     if (len > BLE_MAX_ATT_PAYLOAD) len = BLE_MAX_ATT_PAYLOAD;
     uint16_t needed = 2 + (uint16_t)len;
-    if (rx_pool_wpos + needed > BLE_RX_POOL_BYTES) {
+    if ((uint32_t)rx_pool_used + needed > BLE_RX_POOL_BYTES) {
+        if (s_pool_full_count == 0) {
+            platform_log("pool first-full: t=%lu cb=%lu pushed=%lu used=%u",
+                         (unsigned long)millis(),
+                         (unsigned long)s_callback_count,
+                         (unsigned long)s_pool_push_count,
+                         (unsigned)rx_pool_used);
+        }
         s_pool_full_count++;
         return;   /* pool exhausted */
     }
-    rx_pool[rx_pool_wpos]     = (uint8_t)(len & 0xFF);
-    rx_pool[rx_pool_wpos + 1] = (uint8_t)((len >> 8) & 0xFF);
-    memcpy(&rx_pool[rx_pool_wpos + 2], data, len);
-    rx_pool_wpos += needed;
+    uint8_t hdr[2] = {
+        (uint8_t)(len & 0xFF),
+        (uint8_t)((len >> 8) & 0xFF),
+    };
+    pool_ring_write(rx_pool_wpos, hdr, 2);
+    uint16_t data_pos = (uint16_t)((rx_pool_wpos + 2) % BLE_RX_POOL_BYTES);
+    pool_ring_write(data_pos, data, (uint16_t)len);
+    rx_pool_wpos = (uint16_t)((rx_pool_wpos + needed) % BLE_RX_POOL_BYTES);
+    rx_pool_used += needed;
     rx_pool_count++;
+    if (s_pool_push_count == 0) {
+        platform_log("pool first-push: t=%lu cb=%lu len=%u",
+                     (unsigned long)millis(),
+                     (unsigned long)s_callback_count,
+                     (unsigned)len);
+    }
     s_pool_push_count++;
 }
 
 static bool pool_empty(void)
 {
-    return rx_pool_rpos >= rx_pool_wpos;
+    return rx_pool_count == 0;
 }
+
+static volatile uint32_t s_pool_pop_count = 0;
 
 static bool pool_pop(uint8_t *buf, size_t buf_len, size_t *out_len)
 {
-    if (pool_empty()) return false;
-    uint16_t len = rx_pool[rx_pool_rpos] | ((uint16_t)rx_pool[rx_pool_rpos + 1] << 8);
+    if (rx_pool_count == 0) return false;
+    uint8_t hdr[2];
+    pool_ring_read(rx_pool_rpos, hdr, 2);
+    uint16_t len = (uint16_t)hdr[0] | ((uint16_t)hdr[1] << 8);
     size_t to_copy = len < buf_len ? len : buf_len;
-    memcpy(buf, &rx_pool[rx_pool_rpos + 2], to_copy);
+    uint16_t data_pos = (uint16_t)((rx_pool_rpos + 2) % BLE_RX_POOL_BYTES);
+    pool_ring_read(data_pos, buf, (uint16_t)to_copy);
     *out_len = to_copy;
-    rx_pool_rpos += 2 + len;
+    uint16_t entry = 2 + len;
+    rx_pool_rpos = (uint16_t)((rx_pool_rpos + entry) % BLE_RX_POOL_BYTES);
+    rx_pool_used -= entry;
     rx_pool_count--;
-
-    /* Reclaim buffer when fully drained — allows reuse for next burst */
-    if (pool_empty()) {
-        rx_pool_wpos = 0;
-        rx_pool_rpos = 0;
+    if (s_pool_pop_count == 0) {
+        platform_log("pool first-pop: t=%lu cb=%lu pushed=%lu full=%lu used=%u",
+                     (unsigned long)millis(),
+                     (unsigned long)s_callback_count,
+                     (unsigned long)s_pool_push_count,
+                     (unsigned long)s_pool_full_count,
+                     (unsigned)rx_pool_used);
     }
-
+    s_pool_pop_count++;
     return true;
 }
 #else
@@ -504,6 +566,25 @@ static int ble_nina_send(protocol_adapter_t *self, const uint8_t *data, size_t l
 
     if (len > BLE_MAX_ATT_PAYLOAD) len = BLE_MAX_ATT_PAYLOAD;
 
+    /* MTU guard: ArduinoBLE silently truncates writes that exceed the
+     * negotiated ATT MTU (characteristic.valueSize() reports mtu-3 after
+     * the exchange completes). A truncated packet arrives at the peer
+     * with its CRC chopped off → decode fails → invisible loss. Fail
+     * the send explicitly so the loss is counted and the plan's payload
+     * can be tuned down. Log once when the guard first fires. */
+    uint16_t max_writable = (s_ble.cfg.role == ROLE_RECEIVER)
+                                ? s_ble.rxChar.valueSize()
+                                : s_ble.remote_tx.valueSize();
+    if (max_writable > 0 && len > max_writable) {
+        static uint8_t s_mtu_guard_logged = 0;
+        if (!s_mtu_guard_logged) {
+            platform_log("ble_send: len=%u > max_writable=%u (ATT MTU too small) — dropping",
+                         (unsigned)len, (unsigned)max_writable);
+            s_mtu_guard_logged = 1;
+        }
+        return ADAPTER_ERR_SEND;
+    }
+
     if (s_ble.cfg.role == ROLE_RECEIVER) {
         /* Peripheral: write to local RX char → notify central */
         if (!s_ble.rxChar.writeValue(data, len))
@@ -535,17 +616,6 @@ static int ble_nina_recv(protocol_adapter_t *self, uint8_t *buf, size_t buf_len,
 
     uint32_t start = millis();
     while ((millis() - start) < timeout_ms) {
-#ifdef CPCBF_BLE_HAS_POOL
-        /* Reclaim pool space before the next BLE.poll() burst.
-         * pool_pop()'s compaction rarely fires because BLE.poll()
-         * refills the pool before the last entry is consumed.
-         * Resetting here guarantees the full pool is available. */
-        if (pool_empty()) {
-            rx_pool_wpos = 0;
-            rx_pool_rpos = 0;
-        }
-#endif
-
         BLE.poll();
 
         if (pool_pop(buf, buf_len, out_len))

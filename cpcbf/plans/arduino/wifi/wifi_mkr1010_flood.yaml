@@ -14,6 +14,9 @@ tests:
     mode: flood
     protocol: wifi
     board: mkr_wifi_1010
-    repetitions: 660000
-    inter_packet_us: 200
+    repetitions: 8000
+    inter_packet_us: 25000
     payload_sizes: [1432]
+
+# throughput test with 25 ms pacing to get max throughput (aggregate-only with chunks on MKR) without overwhelming the receiver's buffer and causing drops
+# 1432B payload + 14B bench header = 1446B, WiFiNINA max UDP payload

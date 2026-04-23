@@ -18,6 +18,6 @@ tests:
     mode: flood
     protocol: ble
     board: mkr_wifi_1010
-    repetitions: 2425
-    inter_packet_us: 0
-    payload_sizes: [230]
+    repetitions: 2500
+    inter_packet_us: 120000
+    payload_sizes: [225]
