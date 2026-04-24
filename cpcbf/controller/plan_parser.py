@@ -44,6 +44,8 @@ def _validate_plan(plan: TestPlan) -> None:
             max_payload = 230  # ATT 247 - 3 header - 14 bench overhead
         elif test.board == "mkr_wifi_1010":
             max_payload = 1432
+        elif test.board == "mkr_wan_1300":
+            max_payload = 200  # SX1276 MTU 222 - 14 bench overhead - margin
         else:
             max_payload = 8192
         for size in test.payload_sizes:

@@ -2,6 +2,17 @@
 
 Automated WiFi latency and throughput benchmarking between Raspberry Pi 4 pairs over Wi-Fi Direct.
 
+## Board-specific quick starts
+
+The guide below covers the Raspberry Pi 4 pair over Wi-Fi Direct. For the other supported boards, see the dedicated quickstarts in `cpcbf/`:
+
+- **Arduino MKR WiFi 1010** (WiFi, SoftAP topology): [`cpcbf/MKR_WIFI_QUICKSTART.md`](cpcbf/MKR_WIFI_QUICKSTART.md)
+- **Arduino MKR WiFi 1010** (BLE, GATT topology): [`cpcbf/MKR_BLE_QUICKSTART.md`](cpcbf/MKR_BLE_QUICKSTART.md)
+- **Arduino MKR WAN 1300** (raw LoRa P2P): [`cpcbf/MKR_WAN_QUICKSTART.md`](cpcbf/MKR_WAN_QUICKSTART.md)
+- **Raspberry Pi 4** (BLE, L2CAP CoC): [`cpcbf/RPI4_BLE_QUICKSTART.md`](cpcbf/RPI4_BLE_QUICKSTART.md)
+
+All boards share the same JSON-over-serial/SSH command protocol, plan YAML schema, and analysis pipeline.
+
 ## Prerequisites
 
 ### Hardware

@@ -38,23 +38,33 @@ class RadioIsolation:
         For WiFi tests: disable Bluetooth, ensure WiFi is active.
         For BLE tests on MKR: skip WiFi disable — NINA module shares SPI
         bus for both protocols, and WiFi.end() corrupts BLE init state.
+        For LoRa tests on MKR WAN 1300: no other radios on the board,
+        so nothing to disable — just record the status.
         """
         for host_id in self._manager.host_ids:
             logger.info("Running isolation preflight on %s", host_id)
 
             host = self._manager.get_host_info(host_id)
-            is_mkr = getattr(host, "board_type", "") == "mkr_wifi_1010"
+            is_mkr_wifi = getattr(host, "board_type", "") == "mkr_wifi_1010"
+            is_mkr_wan = getattr(host, "board_type", "") == "mkr_wan_1300"
 
             if self._protocol == "wifi":
                 self._disable_subsystem(host_id, "bluetooth")
             elif self._protocol in ("bluetooth", "ble"):
-                if is_mkr:
+                if is_mkr_wifi:
                     logger.info(
                         "Skipping WiFi disable on MKR %s (shared NINA SPI)",
                         host_id,
                     )
                 else:
                     self._disable_subsystem(host_id, "wifi")
+            elif self._protocol == "lora":
+                if is_mkr_wan:
+                    logger.info(
+                        "MKR WAN 1300 %s has no WiFi/BT to isolate", host_id
+                    )
+                # On other platforms a LoRa shield might coexist — extend
+                # here if we ever add LoRa to RPi4 or WM1110.
 
             # Verify
             status = self._check_status(host_id)
@@ -69,6 +79,13 @@ class RadioIsolation:
                 if status.get("wifi_active", False):
                     raise RuntimeError(
                         f"WiFi still active on {host_id} during Bluetooth test"
+                    )
+            elif self._protocol == "lora":
+                if status.get("wifi_active", False) or status.get(
+                    "bluetooth_active", False
+                ):
+                    raise RuntimeError(
+                        f"WiFi/BT active on {host_id} during LoRa test"
                     )
 
         logger.info("Radio isolation preflight passed for all hosts")

@@ -64,7 +64,7 @@ class HostInfo:
     transport: str = "ssh"          # "ssh" or "serial_bridge"
     serial_port: str = ""           # e.g. "/dev/ttyACM0"
     serial_baud: int = 115200
-    board_type: str = "rpi4"        # "rpi4" or "mkr_wifi_1010"
+    board_type: str = "rpi4"        # "rpi4", "mkr_wifi_1010", or "mkr_wan_1300"
 
 
 @dataclass

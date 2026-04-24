@@ -22,20 +22,20 @@ hosts:
     board_type: mkr_wifi_1010
 
   # LoRa boards on second USB port of the same RPis
-  # Uncomment when MKR WAN 1310 support is implemented
-  # mkr_lora_a:
-  #   hostname: 192.168.8.20     # same RPi as mkr_wifi_a
-  #   username: pi
-  #   password: raspberry
-  #   transport: serial_bridge
-  #   serial_port: /dev/ttyACM1
-  #   serial_baud: 115200
-  #   board_type: mkr_wan_1310
-  # mkr_lora_b:
-  #   hostname: 192.168.8.21     # same RPi as mkr_wifi_b
-  #   username: pi
-  #   password: raspberry
-  #   transport: serial_bridge
-  #   serial_port: /dev/ttyACM1
-  #   serial_baud: 115200
-  #   board_type: mkr_wan_1310
+  mkr_lora_a:
+    hostname: 192.168.8.20       # same RPi as mkr_wifi_a
+    username: pi
+    password: raspberry
+    transport: serial_bridge
+    serial_port: /dev/ttyACM1
+    serial_baud: 115200
+    board_type: mkr_wan_1300
+
+  mkr_lora_b:
+    hostname: 192.168.8.21       # same RPi as mkr_wifi_b
+    username: pi
+    password: raspberry
+    transport: serial_bridge
+    serial_port: /dev/ttyACM1
+    serial_baud: 115200
+    board_type: mkr_wan_1300

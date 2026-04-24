@@ -91,6 +91,28 @@ class Orchestrator:
                 "ble_phy": {"1m": 1, "2m": 2}.get(test.ble_phy, 1),
             }
 
+        # MKR WAN 1300: raw LoRa P2P broadcast — no addressing, symmetric init
+        if test.protocol == "lora":
+            return {
+                "iface_name": "",
+                "peer_addr": "",
+                "peer_mac": "",
+                "port": 0,
+                "channel": 0,
+                "essid": "",
+                "local_ip": "",
+                "netmask": "",
+                "role": role,
+                "topology": "p2p",
+                "protocol": "lora",
+                "mode": test.mode.value,
+                "payload_size": payload_size,
+                "repetitions": test.repetitions,
+                "warmup": test.warmup,
+                "timeout_ms": test.timeout_ms,
+                "inter_packet_us": test.inter_packet_us,
+            }
+
         # MKR WiFi 1010: SoftAP topology (sender=AP, receiver=STA)
         if test.board == "mkr_wifi_1010":
             local_ip = "192.168.4.1" if is_sender else "192.168.4.2"
@@ -252,6 +274,29 @@ class Orchestrator:
                 logger.error(
                     "BLE setup failed after %d attempts", BLE_SETUP_MAX_RETRIES
                 )
+                return None
+        elif test.protocol == "lora":
+            # LoRa: symmetric P2P broadcast — both sides init in parallel.
+            # No handshake; LoRa.begin() is deterministic so no retries.
+            setup_cmd = "LORA_SETUP"
+            logger.info("Setting up LoRa on both sides in parallel...")
+
+            def lora_setup(host_id: str) -> dict:
+                return manager.send(
+                    host_id, {"command": setup_cmd}, timeout=30.0
+                )
+
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                sender_future = pool.submit(lora_setup, sender_id)
+                receiver_future = pool.submit(lora_setup, receiver_id)
+                sender_resp = sender_future.result()
+                receiver_resp = receiver_future.result()
+
+            if sender_resp.get("status") != "ok":
+                logger.error("LoRa setup failed on sender: %s", sender_resp)
+                return None
+            if receiver_resp.get("status") != "ok":
+                logger.error("LoRa setup failed on receiver: %s", receiver_resp)
                 return None
         else:
             # WiFi: sender (GO) first, then receiver (client) — sequential

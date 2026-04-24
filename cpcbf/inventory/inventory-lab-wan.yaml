@@ -1,0 +1,23 @@
+# CPCBF Inventory — Arduino MKR WAN 1300 pair via RPi serial bridges
+# Update bridge RPi IPs and serial ports for your setup.
+# If sharing a bridge RPi with an MKR WiFi 1010, use /dev/ttyACM1
+# (the second USB slot on the RPi).
+
+hosts:
+  mkr_wan_a:
+    hostname: 192.168.8.20       # Bridge RPi A IP
+    username: pi
+    password: raspberry
+    transport: serial_bridge
+    serial_port: /dev/ttyACM0
+    serial_baud: 115200
+    board_type: mkr_wan_1300
+
+  mkr_wan_b:
+    hostname: 192.168.8.21       # Bridge RPi B IP
+    username: pi
+    password: raspberry
+    transport: serial_bridge
+    serial_port: /dev/ttyACM0
+    serial_baud: 115200
+    board_type: mkr_wan_1300

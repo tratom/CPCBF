@@ -1,0 +1,19 @@
+firmware: mkrwan1300_lora_rtt
+
+global:
+  warmup: 10
+  timeout_ms: 5000
+  cooldown_s: 15
+
+tests:
+  # RTT ping-pong: 2 s pacing between pings. Full round-trip at SF7/BW125
+  # with 32B payloads is ~200 ms (ping air time + processing + pong air
+  # time + processing), so 2 s gives a clean measurement window without
+  # self-queueing on the half-duplex radio.
+  - name: lora_mkr1300_rtt
+    mode: ping_pong
+    protocol: lora
+    board: mkr_wan_1300
+    repetitions: 150
+    inter_packet_us: 2000000
+    payload_sizes: [32]
