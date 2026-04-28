@@ -1,0 +1,13 @@
+# CPCBF — stable serial-port symlinks for the autonomous field rig.
+#
+# MKR WiFi 1010 runtime CDC: VID 0x2341 PID 0x8054.
+# MKR WAN 1300  runtime CDC: VID 0x2341 PID 0x8057 (verify with `lsusb`
+#                            on the first deployment — some revisions enumerate
+#                            with 0x8055 / 0x8059).
+#
+# Bossa bootloader CDC PIDs are different from runtime PIDs (typically
+# +0x4000 from the runtime PID). We rely on `firmware_flash._wait_for_runtime_symlink`
+# to wait for the runtime symlink to reappear post-flash; the bootloader port
+# is matched by `_list_acm()` diff, so no rule is needed for it.
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2341", ATTRS{idProduct}=="8054", SYMLINK+="ttyACM_WIFI", MODE="0666"
+SUBSYSTEM=="tty", ATTRS{idVendor}=="2341", ATTRS{idProduct}=="8057", SYMLINK+="ttyACM_WAN",  MODE="0666"

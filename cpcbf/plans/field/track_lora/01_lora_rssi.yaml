@@ -1,0 +1,18 @@
+firmware: mkrwan1300_lora_rssi
+
+global:
+  warmup: 10
+  timeout_ms: 5000
+  cooldown_s: 15
+
+tests:
+  # RSSI test: 1 s pacing between samples. SF7/BW125 air time for a 32B
+  # payload is ~70 ms, so 1 s leaves plenty of headroom and keeps us well
+  # below the 1 % EU duty-cycle limit (100 reps × 70 ms = 7 s TX total).
+  - name: lora_mkr1300_rssi
+    mode: rssi
+    protocol: lora
+    board: mkr_wan_1300
+    repetitions: 100
+    inter_packet_us: 1000000
+    payload_sizes: [32]

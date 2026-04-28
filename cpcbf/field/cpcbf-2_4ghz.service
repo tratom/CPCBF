@@ -1,0 +1,17 @@
+[Unit]
+Description=CPCBF Autonomous Benchmark — 2.4GHz Track (BLE + WiFi on MKR WiFi 1010)
+After=multi-user.target bluetooth.service
+Wants=multi-user.target bluetooth.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 __SCRIPT_DIR__/auto_bench.py __SCRIPT_DIR__/role_2_4ghz.json
+ExecStopPost=/usr/sbin/rfkill unblock all
+ExecStopPost=/bin/systemctl start NetworkManager
+StandardOutput=journal
+StandardError=journal
+RemainAfterExit=yes
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,26 @@
+firmware: mkrwan1300_lora_flood
+
+global:
+  warmup: 10
+  timeout_ms: 10000
+  cooldown_s: 15
+
+tests:
+  # Throughput (flood) — back-to-back transmissions, naturally paced by
+  # LoRa air-time (LoRa.endPacket() blocks until TX completes).
+  # At SF7/BW125/200 B payload: air time ~370 ms/pkt → 60 reps ≈ 22 s TX.
+  #
+  # DUTY-CYCLE WARNING (EU868 at +14 dBm): the 1 % sub-band limit is
+  # 36 s TX/hour. 60 reps stays below this; raising reps or TX power
+  # may violate regulations. For lab experiments, consider dropping
+  # LORA_TX_POWER_DBM to 10 in config.h.
+  #
+  # Agent-side 5-chunk bucketing in test_engine.c gives throughput
+  # std-dev without per-packet storage.
+  - name: lora_mkr1300_flood
+    mode: flood
+    protocol: lora
+    board: mkr_wan_1300
+    repetitions: 850
+    inter_packet_us: 110000
+    payload_sizes: [200]

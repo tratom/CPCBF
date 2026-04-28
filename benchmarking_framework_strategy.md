@@ -2,8 +2,8 @@
 
 ## Strategy & Design Document
 
-**Version:** 1.1  
-**Date:** 05 March 2026  
+**Version:** 1.2  
+**Date:** 24 April 2026  
 **Author:** Tommaso Tragno — FCUL
 
 ---
@@ -37,6 +37,18 @@ Two core principles guide the design:
 - Security benchmarking (encryption overhead is not isolated).
 - Cellular protocols (LTE, 5G, NB-IoT).
 
+### 2.3 Deployment Modes
+
+The framework supports two intended execution modes:
+
+- **Controller-driven lab mode:** a development PC orchestrates tests over a side-channel, collects raw results, and runs the standard post-processing pipeline.
+- **Autonomous field mode:** a subset of the full framework scope is deployed directly on the field hardware (for example, Raspberry Pi bridges plus attached Arduino boards) and runs without continuous SSH orchestration. In this mode, the same benchmark semantics apply, but execution is localized on the field nodes and raw results are collected for later upload to a central server.
+
+For consistency, this document uses the following synchronization terms:
+
+- **Bridge-side sync:** a synchronization step over the control-side link between field bridge nodes, used to confirm matching plan and firmware state after events such as reflashing.
+- **Radio-side sync:** a synchronization step over the radio under test, used immediately before or during the benchmark round itself.
+
 ---
 
 ## 3. Test Topology & Constraints
@@ -51,7 +63,7 @@ Concretely, the required board inventory is:
 |-------|:--------:|------------------------------|
 | Raspberry Pi 4 Model B | 2 | WiFi (802.11ac, BCM43455), Bluetooth/BLE (BCM43455) |
 | Arduino MKR WAN 1300 | 2 | LoRa (CMWX1ZZABZ-078 + external antenna) |
-| Arduino MKR WiFi 1010 | 2 | WiFi (NINA-W102, 802.11b/g/n) |
+| Arduino MKR WiFi 1010 | 2 | WiFi and BLE (NINA-W102) |
 | Seeed Wio-WM1110 Dev Kit | 2 | LoRa (SX1262), BLE (nRF52840), Zigbee (802.15.4 via nRF52840), WiFi (if supported via external module) |
 | G.hn Powerline adapters | 2 | G.hn (tested indirectly — RPi pair communicates over Ethernet through the powerline bridge) |
 
@@ -63,7 +75,7 @@ Each board is tested **only on its integrated radio modules** — no external sh
 |----------|:-:|:-:|:-:|:-:|:-:|
 | **WiFi** | ✅ integrated | ❌ | ✅ integrated | ❌ | ❌ |
 | **LoRa** | ❌ | ✅ integrated + ext. antenna | ❌ | ✅ integrated (SX1262) | ❌ |
-| **BLE** | ✅ integrated | ❌ | ❌ | ✅ integrated (nRF52840) | ❌ |
+| **BLE** | ✅ integrated | ❌ | ✅ integrated (NINA-W102) | ✅ integrated (nRF52840) | ❌ |
 | **Zigbee** | ❌ | ❌ | ❌ | ✅ integrated (802.15.4) | ❌ |
 | **G.hn** | ✅ via Ethernet bridge | ❌ | ❌ | ❌ | ✅ native |
 
@@ -76,13 +88,14 @@ This yields the following **concrete test pairings**:
 | T1 | WiFi | RPi 4 ↔ RPi 4 | BCM43455 |
 | T2 | WiFi | MKR WiFi 1010 ↔ MKR WiFi 1010 | NINA-W102 |
 | T3 | BLE | RPi 4 ↔ RPi 4 | BCM43455 |
-| T4 | BLE | WM1110 ↔ WM1110 | nRF52840 |
-| T5 | LoRa | MKR WAN 1300 ↔ MKR WAN 1300 | CMWX1ZZABZ |
-| T6 | LoRa | WM1110 ↔ WM1110 | SX1262 |
-| T7 | Zigbee | WM1110 ↔ WM1110 | nRF52840 (802.15.4) |
-| T8 | G.hn | RPi 4 ↔ RPi 4 (via PLC adapters) | Powerline bridge |
+| T4 | BLE | MKR WiFi 1010 ↔ MKR WiFi 1010 | NINA-W102 |
+| T5 | BLE | WM1110 ↔ WM1110 | nRF52840 |
+| T6 | LoRa | MKR WAN 1300 ↔ MKR WAN 1300 | CMWX1ZZABZ |
+| T7 | LoRa | WM1110 ↔ WM1110 | SX1262 |
+| T8 | Zigbee | WM1110 ↔ WM1110 | nRF52840 (802.15.4) |
+| T9 | G.hn | RPi 4 ↔ RPi 4 (via PLC adapters) | Powerline bridge |
 
-The analysis pipeline handles this sparse matrix gracefully — not every board tests every protocol, and cross-protocol comparisons are made at the protocol level (aggregating across boards that support that protocol) as well as within the same board (e.g., WM1110 LoRa vs. WM1110 BLE vs. WM1110 Zigbee).
+The analysis pipeline handles this sparse matrix gracefully — not every board tests every protocol, and cross-protocol comparisons are made at the protocol level (aggregating across boards that support that protocol) as well as within the same board (e.g., WM1110 LoRa vs. WM1110 BLE vs. WM1110 Zigbee, or MKR WiFi 1010 WiFi vs. MKR WiFi 1010 BLE).
 
 ### 3.3 Radio Isolation Requirement
 
@@ -119,6 +132,8 @@ This is enforced both by the agent firmware (which activates only one adapter at
 | **FR-12** | Each test shall log environmental metadata: board ID, firmware version, protocol config, distance, timestamp. | Must |
 | **FR-13** | Each test shall use a **homogeneous board pair** — sender and receiver must be the same board model. The test plan validator shall reject configurations pairing different boards. | Must |
 | **FR-14** | Before each test, both agents shall **disable all radio interfaces except the one under test** and verify no background network connections exist. The controller shall run a pre-flight check and abort if isolation is not confirmed. | Must |
+| **FR-15** | The framework shall support both a **controller-driven lab mode** and an **autonomous field mode** that executes a validated subset of the benchmark plans locally on field hardware and uploads raw results later for centralized processing. | Should |
+| **FR-16** | In autonomous field mode, the system shall support both **bridge-side sync** after firmware transitions and **radio-side sync** during each test round so sender and receiver do not proceed with mismatched state. | Should |
 
 ### 4.2 Non-Functional Requirements
 
@@ -143,7 +158,7 @@ This is enforced both by the agent firmware (which activates only one adapter at
 |----------|----------|-------------|-------|
 | **Raspberry Pi 4 Model B** | C (with POSIX sockets) | CMake + cross-compile or native gcc | Integrated WiFi (BCM43455) and BLE (BCM43455); tested on separate runs. BLE via BlueZ/D-Bus. G.hn via Ethernet passthrough to powerline adapter. |
 | **Arduino MKR WAN 1300** | C++ (Arduino framework) | PlatformIO | Integrated LoRa (CMWX1ZZABZ-078 + external antenna); library: MKRWAN |
-| **Arduino MKR WiFi 1010** | C++ (Arduino framework) | PlatformIO | Integrated WiFi (NINA-W102, u-blox); library: WiFiNINA |
+| **Arduino MKR WiFi 1010** | C++ (Arduino framework) | PlatformIO | Integrated WiFi and BLE via NINA-W102; libraries: WiFiNINA / ArduinoBLE (or equivalent NINA BLE stack) |
 | **Seeed WM1110** | C (nRF5 SDK / Zephyr RTOS) | West (Zephyr build) or nRF Connect SDK | Integrated LoRa (SX1262 via SPI), BLE and Zigbee/802.15.4 (nRF52840 SoftDevice); tested on separate runs per protocol |
 
 ### 5.2 Common Test Protocol (Wire Format)
@@ -169,7 +184,7 @@ All agents share a **Benchmark Packet** format on the wire:
 - **Timestamp**: sender's local µs counter at transmission; the receiver logs its own reception timestamp independently.
 - **CRC-32**: computed over all preceding bytes, providing corruption detection above the link layer.
 
-This fixed header is **13 bytes**, fitting comfortably within the smallest MTUs (LoRa ≈ 222 B, BLE ≈ 244 B, Zigbee ≈ 127 B).
+This fixed header is **14 bytes**, fitting comfortably within the smallest MTUs (LoRa ≈ 222 B, BLE ≈ 244 B, Zigbee ≈ 127 B).
 
 ### 5.3 Test Controller
 
@@ -418,6 +433,8 @@ tests:
 5. **Test execution:** The controller sends CTRL-START to both agents simultaneously (within side-channel jitter). Agents execute the specified mode. On completion (all packets sent + timeout for last reply), agents report results over the side-channel.
 6. **Cooldown:** A pause between consecutive tests prevents thermal or buffer-related carryover effects.
 7. **Multi-distance runs (optional):** Repeat the entire plan at 1 m, 5 m, 10 m, 20 m to capture range-dependent behavior.
+
+In autonomous field mode, this same procedure is adapted as follows: field nodes perform a **bridge-side sync** after each firmware flash to confirm matching plan state, then rely on **radio-side sync** for each benchmark round on the radio under test.
 
 ### 7.4 Fairness Controls
 

@@ -1,19 +1,64 @@
 #!/usr/bin/env python3
-"""CPCBF autonomous field benchmark runner."""
+"""CPCBF autonomous field benchmark runner — dual-track, two MKR boards.
 
-import subprocess, json, yaml, sys, os, glob, time, datetime
+Reads a role JSON path from argv[1] (defaults to field/role.json) and walks
+plans/<plans_subdir>/**/*.yaml in alphabetical order. For each plan:
+
+    1. acquire BluetoothControlArbiter (track-aware, with plan-boundary
+       fairness so 2_4ghz yields to a pending lora request)
+    2. firmware_flash.flash_with_retry(...) — bossac the env named in the
+       plan's top-level `firmware:` field
+    3. bridge_sync.sync(...) — L2CAP CoC manifest exchange between the two
+       RPi bridges so neither side starts a test with stale state
+    4. (2_4ghz only) rfkill block wifi+bluetooth for the test plan duration
+    5. run_test_plan(...) — same SYNC/CONFIGURE/SETUP/START flow as before,
+       extended with a `lora` protocol branch
+    6. release the lock at plan boundary (lora releases earlier so its
+       lock-free LoRa test can overlap with the next 2_4ghz plan)
+
+See cpcbf/../design-choices/auto-flasher-and-runner-arduino.md for the
+authoritative design.
+"""
+from __future__ import annotations
+
+import datetime
+import glob
+import json
+import os
+import signal
+import subprocess
+import sys
+import time
+import yaml
+
+from bluetooth_control_arbiter import BluetoothControlArbiter
+import bridge_sync
+import firmware_flash
+import radio_isolation_local
+
 
 REPO_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 AGENT_BIN = "/bin/cpcbf_agent"
 RELAY_SCRIPT = os.path.join(os.path.dirname(os.path.abspath(__file__)), "serial_relay.py")
 PLANS_DIR = os.path.join(REPO_DIR, "plans")
-ROLE_FILE = os.path.join(REPO_DIR, "field", "role.json")
+DEFAULT_ROLE_FILE = os.path.join(REPO_DIR, "field", "role.json")
 OUTPUT_DIR = os.path.join(REPO_DIR, "field", "results")
+FLASH_LOG = "/tmp/cpcbf_flash.log"
 LED_PATH = "/sys/class/leds/ACT"
+
+MAX_RETRIES = 3
+SETUP_FAIL_PACING_S = 30
+BOUNDARY_GRACE_S = 5.0
+LORA_PENDING_CEILING_S = 60.0
+
+SETUP_BY_PROTO = {
+    "ble": "BLE_SETUP",
+    "wifi": "WIFI_SETUP",
+    "lora": "LORA_SETUP",
+}
 
 
 def led_heartbeat():
-    """Set ACT LED to heartbeat mode (blinking)."""
     try:
         with open(f"{LED_PATH}/trigger", "w") as f:
             f.write("heartbeat")
@@ -22,7 +67,6 @@ def led_heartbeat():
 
 
 def led_off():
-    """Turn ACT LED off (solid off = done)."""
     try:
         with open(f"{LED_PATH}/trigger", "w") as f:
             f.write("none")
@@ -33,22 +77,16 @@ def led_off():
 
 
 def send_cmd(proc, cmd_dict, timeout=120):
-    """Send JSON command to agent, read JSON response."""
     proc.stdin.write(json.dumps(cmd_dict) + "\n")
     proc.stdin.flush()
     line = proc.stdout.readline()
     return json.loads(line)
 
 
-MAX_RETRIES = 3
-SETUP_FAIL_PACING_S = 30  # sleep after link setup failure to stay in step with peer
-
-
 def _start_proc(role_cfg):
-    """Start agent or serial relay subprocess based on board_type."""
     board = role_cfg.get("board_type", "rpi4")
     if board.startswith("mkr_"):
-        port = role_cfg.get("serial_port", "/dev/ttyACM0")
+        port = role_cfg["serial_port"]
         baud = str(role_cfg.get("serial_baud", 115200))
         proc = subprocess.Popen(
             ["python3", RELAY_SCRIPT, port, baud],
@@ -57,21 +95,18 @@ def _start_proc(role_cfg):
             stderr=open("/tmp/cpcbf_relay.log", "a"),
             text=True,
         )
-        # Wait for relay to be ready (2s Arduino reset + boot drain)
         time.sleep(3)
         return proc
-    else:
-        return subprocess.Popen(
-            ["sudo", AGENT_BIN],
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=open("/tmp/cpcbf_agent.log", "a"),
-            text=True,
-        )
+    return subprocess.Popen(
+        ["sudo", AGENT_BIN],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=open("/tmp/cpcbf_agent.log", "a"),
+        text=True,
+    )
 
 
 def _kill_agent(proc, protocol, board_type="rpi4"):
-    """Stop agent cleanly and restart NetworkManager if needed."""
     try:
         send_cmd(proc, {"command": "STOP"}, timeout=10)
     except Exception:
@@ -79,46 +114,59 @@ def _kill_agent(proc, protocol, board_type="rpi4"):
     proc.terminate()
     proc.wait()
     if protocol != "ble" and not board_type.startswith("mkr_"):
-        subprocess.run(
-            ["systemctl", "start", "NetworkManager"],
-            capture_output=True, timeout=10,
-        )
+        subprocess.run(["systemctl", "start", "NetworkManager"],
+                       capture_output=True, timeout=10)
 
 
 def _build_params(role_cfg, plan_global, test, payload_size):
-    """Build CONFIGURE params from role config and plan."""
     g = plan_global
     role_str = role_cfg["role"]
     protocol = test.get("protocol", "wifi")
-    topology = g.get("topology", test.get("topology",
-                     "ble_l2cap" if protocol == "ble" else "p2p"))
+    board = test.get("board", role_cfg.get("board_type", "rpi4"))
 
     common = {
         "role": role_str,
-        "topology": topology,
         "mode": test["mode"],
         "payload_size": payload_size,
         "repetitions": g.get("repetitions", test.get("repetitions", 100)),
         "warmup": g.get("warmup", test.get("warmup", 5)),
         "timeout_ms": g.get("timeout_ms", test.get("timeout_ms", 5000)),
         "inter_packet_us": g.get("inter_packet_us", test.get("inter_packet_us", 0)),
+        "protocol": protocol,
     }
 
-    if protocol == "ble":
+    if protocol == "lora":
         common.update({
-            "iface_name": "hci0",
+            "iface_name": "",
             "peer_addr": "",
-            "peer_mac": role_cfg["ble_mac_peer"],
+            "peer_mac": "",
+            "port": 0,
+            "channel": 0,
+            "essid": "",
+            "local_ip": "",
+            "netmask": "",
+            "topology": "p2p",
+        })
+        return common
+
+    if protocol == "ble":
+        topology = ("ble_gatt" if board == "mkr_wifi_1010"
+                    else g.get("topology", test.get("topology", "ble_l2cap")))
+        common.update({
+            "iface_name": "" if board == "mkr_wifi_1010" else "hci0",
+            "peer_addr": "",
+            "peer_mac": role_cfg.get("ble_mac_peer", ""),
             "port": g.get("port", test.get("port", 128)),
             "channel": 0,
             "essid": "",
             "local_ip": "",
             "netmask": "",
-            "protocol": "ble",
+            "topology": topology,
         })
-    elif protocol == "wifi" and role_cfg.get("board_type", "rpi4").startswith("mkr_"):
-        # MKR WiFi: SoftAP topology, fixed IPs
-        is_sender = (role_str == "sender")
+        return common
+
+    if protocol == "wifi" and board == "mkr_wifi_1010":
+        is_sender = role_str == "sender"
         common.update({
             "iface_name": "",
             "peer_addr": "192.168.4.2" if is_sender else "192.168.4.1",
@@ -130,43 +178,37 @@ def _build_params(role_cfg, plan_global, test, payload_size):
             "netmask": "255.255.255.0",
             "topology": "softap",
         })
-    else:
-        common.update({
-            "iface_name": "wlan0",
-            "peer_addr": role_cfg["peer_addr"],
-            "peer_mac": role_cfg["peer_mac"],
-            "port": g.get("port", test.get("port", 5201)),
-            "channel": g.get("channel", test.get("channel", 2437)),
-            "local_ip": role_cfg["local_ip"],
-            "netmask": "255.255.255.0",
-        })
+        return common
 
+    common.update({
+        "iface_name": "wlan0",
+        "peer_addr": role_cfg["peer_addr"],
+        "peer_mac": role_cfg["peer_mac"],
+        "port": g.get("port", test.get("port", 5201)),
+        "channel": g.get("channel", test.get("channel", 2437)),
+        "essid": g.get("essid", test.get("essid", "CPCBF_TEST")),
+        "local_ip": role_cfg["local_ip"],
+        "netmask": "255.255.255.0",
+        "topology": g.get("topology", test.get("topology", "p2p")),
+    })
     return common
 
 
 def flatten_schedule(plan, rounds):
-    """Build an ordered list of (round, test, payload_size) with test_idx.
-
-    Both sides compute the same list from the same YAML plan in the same
-    order, so test_idx is deterministic and identical on sender and receiver.
-    """
     schedule = []
     idx = 0
     for r in range(1, rounds + 1):
         for test in plan["tests"]:
             for payload_size in test["payload_sizes"]:
                 schedule.append({
-                    "round": r,
-                    "test": test,
-                    "payload_size": payload_size,
-                    "test_idx": idx,
+                    "round": r, "test": test,
+                    "payload_size": payload_size, "test_idx": idx,
                 })
                 idx += 1
     return schedule
 
 
 def run_test_plan(role_cfg, plan, label_prefix, rounds=1):
-    """Run one YAML plan through the agent with indexed SYNC."""
     g = plan["global"]
     schedule = flatten_schedule(plan, rounds)
 
@@ -181,19 +223,16 @@ def run_test_plan(role_cfg, plan, label_prefix, rounds=1):
         role_str = role_cfg["role"]
         protocol = test.get("protocol", "wifi")
         params = _build_params(role_cfg, g, test, payload_size)
-        setup_cmd = "BLE_SETUP" if protocol == "ble" else "WIFI_SETUP"
+        setup_cmd = SETUP_BY_PROTO[protocol]
 
         success = False
         idx_skipped = False
-        sync_resp = {}
 
         for attempt in range(1, MAX_RETRIES + 1):
             proc = _start_proc(role_cfg)
             try:
-                # CONFIGURE
                 send_cmd(proc, {"command": "CONFIGURE", "params": params})
 
-                # Link setup
                 setup_resp = send_cmd(proc, {"command": setup_cmd}, timeout=120)
                 if setup_resp.get("status") != "ok":
                     print(f"[idx={test_idx} attempt {attempt}/{MAX_RETRIES}] "
@@ -201,7 +240,6 @@ def run_test_plan(role_cfg, plan, label_prefix, rounds=1):
                     time.sleep(SETUP_FAIL_PACING_S)
                     continue
 
-                # Pre-test SYNC with test_idx + phase=0
                 sync_resp = send_cmd(
                     proc,
                     {"command": "SYNC", "params": {
@@ -214,16 +252,15 @@ def run_test_plan(role_cfg, plan, label_prefix, rounds=1):
 
                 if sync_resp.get("status") == "idx_mismatch":
                     peer_idx = sync_resp.get("data", {}).get("peer_test_idx", test_idx)
-                    print(f"[idx={test_idx}] idx mismatch, peer at {peer_idx} — skipping forward")
+                    print(f"[idx={test_idx}] idx mismatch, peer at {peer_idx} — skipping")
                     skip_target = None
                     for j in range(i + 1, len(schedule)):
                         if schedule[j]["test_idx"] == peer_idx:
                             skip_target = j
                             break
                     if skip_target is not None:
-                        i = skip_target - 1  # -1 to compensate for i += 1 at loop bottom
+                        i = skip_target - 1
                     else:
-                        print(f"[idx={test_idx}] peer_idx {peer_idx} beyond schedule, done")
                         i = len(schedule)
                     idx_skipped = True
                     break
@@ -233,7 +270,6 @@ def run_test_plan(role_cfg, plan, label_prefix, rounds=1):
                           f"SYNC failed: {sync_resp.get('message', '?')}")
                     continue
 
-                # START (blocking) — dynamic timeout based on test params
                 max_test_s = ((params["repetitions"] + params["warmup"])
                               * (params["timeout_ms"] / 1000))
                 if params["inter_packet_us"] > 0:
@@ -241,10 +277,8 @@ def run_test_plan(role_cfg, plan, label_prefix, rounds=1):
                 start_timeout = max(300, int(max_test_s) + 60)
                 send_cmd(proc, {"command": "START"}, timeout=start_timeout)
 
-                # GET_RESULTS
                 resp = send_cmd(proc, {"command": "GET_RESULTS"})
 
-                # Post-test SYNC — dynamic timeout for early abort drain
                 post_sync_timeout = max(120000, 50 * params["timeout_ms"] + 30000)
                 send_cmd(
                     proc,
@@ -256,7 +290,6 @@ def run_test_plan(role_cfg, plan, label_prefix, rounds=1):
                     timeout=int(post_sync_timeout / 1000) + 60,
                 )
 
-                # Save results
                 test_name = (f"{label_prefix}_r{round_num:02d}"
                              f"_{test['name']}_{payload_size}B")
                 result_file = os.path.join(
@@ -283,58 +316,161 @@ def run_test_plan(role_cfg, plan, label_prefix, rounds=1):
                     f.write("\n")
 
                 success = True
-                break  # test succeeded, move to next
+                break
 
             except Exception as e:
-                print(f"[idx={test_idx} attempt {attempt}/{MAX_RETRIES}] "
-                      f"exception: {e}")
+                print(f"[idx={test_idx} attempt {attempt}/{MAX_RETRIES}] exception: {e}")
 
             finally:
                 _kill_agent(proc, protocol,
-                           board_type=role_cfg.get("board_type", "rpi4"))
+                            board_type=role_cfg.get("board_type", "rpi4"))
 
         if not success and not idx_skipped:
             print(f"FAILED after {MAX_RETRIES} attempts: "
                   f"{test['name']} payload={payload_size} test_idx={test_idx}")
 
         i += 1
-
-        # Cooldown between tests
         time.sleep(g.get("cooldown_s", test.get("cooldown_s", 5)))
 
 
-def restore_network():
-    """Safety net: always restart NetworkManager so ethernet works."""
-    subprocess.run(
-        ["systemctl", "start", "NetworkManager"],
-        capture_output=True, timeout=10,
-    )
+def _flash_for_plan(role_cfg, plan, plan_name):
+    env = plan.get("firmware")
+    if not env:
+        print(f"[{plan_name}] no `firmware:` field — skipping flash")
+        return
+    port = role_cfg["serial_port"]
+    fw_dir = role_cfg.get("firmware_dir",
+                          os.path.join(os.path.dirname(__file__), "firmware"))
+    print(f"[{plan_name}] flashing {env} on {port}")
+    firmware_flash.flash_with_retry(port, env, fw_dir, FLASH_LOG)
+
+
+def _bridge_sync_for_plan(role_cfg, plan, plan_name, plan_idx, rounds):
+    """Run one bridge-side handshake per plan (covers all rounds in that plan).
+
+    Used after every successful flash. A mismatch raises BridgeSyncError so
+    the caller can skip the plan.
+    """
+    peer_mac = role_cfg.get("bridge_peer_bt_mac")
+    if not peer_mac:
+        print(f"[{plan_name}] no bridge_peer_bt_mac — skipping bridge sync")
+        return
+    manifest = {
+        "track": role_cfg["track"],
+        "plan": plan_name,
+        "firmware": plan.get("firmware", ""),
+        "round": rounds,
+        "mode": ",".join(t["mode"] for t in plan.get("tests", [])),
+        "role": role_cfg["role"],
+    }
+    print(f"[{plan_name}] bridge sync with {peer_mac}")
+    bridge_sync.sync(role_cfg["role"], peer_mac, manifest)
+
+
+def _wait_for_lora_pending_clear(timeout_s: float) -> None:
+    deadline = time.monotonic() + timeout_s
+    flag = "/var/lib/cpcbf/lora_pending.flag"
+    while os.path.exists(flag) and time.monotonic() < deadline:
+        time.sleep(0.5)
+
+
+def _run_track(role_cfg, arbiter):
+    track = role_cfg["track"]
+    label = role_cfg.get("label", datetime.datetime.now().strftime("%Y%m%d_%H%M"))
+    label = f"{label}_{track}"
+    rounds = role_cfg.get("rounds", 1)
+    plans_subdir = role_cfg.get("plans_subdir", "")
+    plans_dir = os.path.join(PLANS_DIR, plans_subdir)
+    plan_files = sorted(glob.glob(os.path.join(plans_dir, "**/*.yaml"),
+                                  recursive=True))
+
+    if not plan_files:
+        print(f"[{track}] no plans found in {plans_dir}")
+        return
+
+    for plan_idx, plan_path in enumerate(plan_files):
+        plan_name = os.path.splitext(os.path.basename(plan_path))[0]
+
+        # Boundary fairness yield (skip on first plan).
+        if plan_idx > 0:
+            arbiter.release()
+            time.sleep(BOUNDARY_GRACE_S)
+            if track == "2_4ghz":
+                _wait_for_lora_pending_clear(LORA_PENDING_CEILING_S)
+
+        arbiter.acquire(blocking=True)
+
+        with open(plan_path) as f:
+            plan = yaml.safe_load(f)
+
+        try:
+            _flash_for_plan(role_cfg, plan, plan_name)
+        except firmware_flash.FlashError as e:
+            print(f"[{plan_name}] FLASH_FAILED: {e}")
+            continue
+
+        try:
+            _bridge_sync_for_plan(role_cfg, plan, plan_name, plan_idx, rounds)
+        except bridge_sync.BridgeSyncError as e:
+            print(f"[{plan_name}] BRIDGE_SYNC_FAILED: {e}")
+            continue
+
+        # 2_4ghz: block RPi wifi+bt for the test plan; lora: drop the lock so
+        # the next 2_4ghz plan can flash while LoRa runs.
+        if track == "2_4ghz":
+            radio_isolation_local.block_2_4ghz()
+            try:
+                run_test_plan(role_cfg, plan, label, rounds=rounds)
+            finally:
+                radio_isolation_local.unblock_all()
+        else:
+            arbiter.release()
+            run_test_plan(role_cfg, plan, label, rounds=rounds)
+
+
+def _install_signal_handlers(arbiter):
+    def _handler(signum, _frame):
+        try:
+            radio_isolation_local.unblock_all()
+        except Exception:
+            pass
+        try:
+            arbiter.release()
+        except Exception:
+            pass
+        led_off()
+        sys.exit(128 + signum)
+
+    signal.signal(signal.SIGTERM, _handler)
+    signal.signal(signal.SIGINT, _handler)
 
 
 def main():
+    role_path = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_ROLE_FILE
+
     led_heartbeat()
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-    role_cfg = {}
+    with open(role_path) as f:
+        role_cfg = json.load(f)
+
+    track = role_cfg.get("track", "2_4ghz")
+    role_cfg["track"] = track
+    arbiter = BluetoothControlArbiter(track)
+    _install_signal_handlers(arbiter)
+
     try:
-        with open(ROLE_FILE) as f:
-            role_cfg = json.load(f)
-
-        label = role_cfg.get("label", datetime.datetime.now().strftime("%Y%m%d_%H%M"))
-
-        rounds = role_cfg.get("rounds", 1)
-        plans_subdir = role_cfg.get("plans_subdir", "")
-        plans_dir = os.path.join(PLANS_DIR, plans_subdir)
-        plan_files = sorted(glob.glob(os.path.join(plans_dir, "**/*.yaml"), recursive=True))
-        for plan_path in plan_files:
-            with open(plan_path) as f:
-                plan = yaml.safe_load(f)
-            run_test_plan(role_cfg, plan, label, rounds=rounds)
+        _run_track(role_cfg, arbiter)
     finally:
-        if not role_cfg.get("board_type", "rpi4").startswith("mkr_"):
-            restore_network()
-
-    led_off()
+        try:
+            radio_isolation_local.unblock_all()
+        except Exception:
+            pass
+        try:
+            arbiter.release()
+        except Exception:
+            pass
+        led_off()
 
 
 if __name__ == "__main__":
