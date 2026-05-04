@@ -24,7 +24,18 @@ from typing import Optional
 
 
 BTPROTO_L2CAP = 0
-PSM = 0x81
+BDADDR_ANY = "00:00:00:00:00:00"
+
+# Per-track PSM. Both tracks on each RPi share a single BT controller, so if
+# they both bound the same PSM the listener that wins the bind is whichever
+# track's process happens to be holding the BT arbiter at that moment — and
+# the *other* Pi's connector can land on the wrong listener (we observed
+# "manifest mismatch on 'track'" in the field for exactly this reason).
+# BR/EDR PSMs must be odd in the dynamic range; 0x81 / 0x83 both qualify.
+PSM_BY_TRACK = {
+    "2_4ghz": 0x81,
+    "lora": 0x83,
+}
 
 CONNECT_TIMEOUT_S = 60.0
 EXCHANGE_TIMEOUT_S = 30.0
@@ -69,9 +80,9 @@ def _check_match(local: dict, remote: dict) -> None:
         raise BridgeSyncError(f"roles not complementary: {pair}")
 
 
-def _listen_and_exchange(local_manifest: dict, timeout_s: float) -> dict:
+def _listen_and_exchange(local_manifest: dict, psm: int, timeout_s: float) -> dict:
     srv = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_SEQPACKET, BTPROTO_L2CAP)
-    srv.bind(("", PSM))
+    srv.bind((BDADDR_ANY, psm))
     srv.listen(LISTEN_BACKLOG)
     srv.settimeout(timeout_s)
     try:
@@ -91,7 +102,7 @@ def _listen_and_exchange(local_manifest: dict, timeout_s: float) -> dict:
             pass
 
 
-def _connect_and_exchange(peer_mac: str, local_manifest: dict,
+def _connect_and_exchange(peer_mac: str, psm: int, local_manifest: dict,
                           timeout_s: float) -> dict:
     deadline = time.monotonic() + timeout_s
     last_err: Optional[Exception] = None
@@ -100,7 +111,7 @@ def _connect_and_exchange(peer_mac: str, local_manifest: dict,
                           BTPROTO_L2CAP)
         s.settimeout(min(10.0, max(2.0, deadline - time.monotonic())))
         try:
-            s.connect((peer_mac, PSM))
+            s.connect((peer_mac, psm))
         except (OSError, socket.timeout) as e:
             last_err = e
             try:
@@ -120,7 +131,7 @@ def _connect_and_exchange(peer_mac: str, local_manifest: dict,
                 pass
 
     raise BridgeSyncError(
-        f"could not connect to {peer_mac} on PSM {PSM:#x} within "
+        f"could not connect to {peer_mac} on PSM {psm:#x} within "
         f"{timeout_s}s (last={last_err})"
     )
 
@@ -143,9 +154,14 @@ def sync(role: str, peer_mac: str, manifest: dict,
         raise BridgeSyncError(
             f"manifest role {manifest['role']!r} != configured role {role!r}")
 
+    track = manifest["track"]
+    if track not in PSM_BY_TRACK:
+        raise BridgeSyncError(f"unknown track {track!r} (no PSM mapping)")
+    psm = PSM_BY_TRACK[track]
+
     if role == "receiver":
-        peer = _listen_and_exchange(manifest, connect_timeout_s)
+        peer = _listen_and_exchange(manifest, psm, connect_timeout_s)
     else:
-        peer = _connect_and_exchange(peer_mac, manifest, connect_timeout_s)
+        peer = _connect_and_exchange(peer_mac, psm, manifest, connect_timeout_s)
 
     _check_match(manifest, peer)

@@ -5,6 +5,8 @@ Wants=multi-user.target bluetooth.service
 
 [Service]
 Type=oneshot
+Environment=PYTHONUNBUFFERED=1
+ExecStartPre=/bin/sh -c '/usr/bin/hciconfig hci0 up; /usr/bin/hciconfig hci0 piscan'
 ExecStart=/usr/bin/python3 __SCRIPT_DIR__/auto_bench.py __SCRIPT_DIR__/role_lora.json
 StandardOutput=journal
 StandardError=journal

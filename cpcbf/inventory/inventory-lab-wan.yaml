@@ -9,7 +9,7 @@ hosts:
     username: pi
     password: raspberry
     transport: serial_bridge
-    serial_port: /dev/ttyACM0
+    serial_port: /dev/ttyACM_WAN
     serial_baud: 115200
     board_type: mkr_wan_1300
 
@@ -18,6 +18,6 @@ hosts:
     username: pi
     password: raspberry
     transport: serial_bridge
-    serial_port: /dev/ttyACM0
+    serial_port: /dev/ttyACM_WAN
     serial_baud: 115200
     board_type: mkr_wan_1300

@@ -50,6 +50,11 @@ MAX_RETRIES = 3
 SETUP_FAIL_PACING_S = 30
 BOUNDARY_GRACE_S = 5.0
 LORA_PENDING_CEILING_S = 60.0
+# Per-plan bridge-sync retry budget. A failure here usually means the peer Pi
+# is currently on the OTHER track (its arbiter is held by lora while we're on
+# 2_4ghz, or vice-versa). Retrying with arbiter release in between lets the
+# peer drain its other track and meet us on this plan.
+BRIDGE_SYNC_RETRIES = 4
 
 SETUP_BY_PROTO = {
     "ble": "BLE_SETUP",
@@ -409,10 +414,30 @@ def _run_track(role_cfg, arbiter):
             print(f"[{plan_name}] FLASH_FAILED: {e}")
             continue
 
-        try:
-            _bridge_sync_for_plan(role_cfg, plan, plan_name, plan_idx, rounds)
-        except bridge_sync.BridgeSyncError as e:
-            print(f"[{plan_name}] BRIDGE_SYNC_FAILED: {e}")
+        # Bridge-sync retry: if it fails, the peer Pi is most likely on its
+        # OTHER track right now. Release the arbiter so our other track on
+        # THIS Pi can also run (which lets the peer catch up to this plan
+        # via its own boundary yield), then re-acquire and retry.
+        bridge_synced = False
+        for attempt in range(1, BRIDGE_SYNC_RETRIES + 1):
+            try:
+                _bridge_sync_for_plan(role_cfg, plan, plan_name, plan_idx,
+                                      rounds)
+                bridge_synced = True
+                break
+            except bridge_sync.BridgeSyncError as e:
+                print(f"[{plan_name}] BRIDGE_SYNC_FAILED "
+                      f"(attempt {attempt}/{BRIDGE_SYNC_RETRIES}): {e}")
+                if attempt == BRIDGE_SYNC_RETRIES:
+                    break
+                arbiter.release()
+                time.sleep(BOUNDARY_GRACE_S)
+                if track == "2_4ghz":
+                    _wait_for_lora_pending_clear(LORA_PENDING_CEILING_S)
+                arbiter.acquire(blocking=True)
+
+        if not bridge_synced:
+            print(f"[{plan_name}] giving up bridge sync — skipping plan")
             continue
 
         # 2_4ghz: block RPi wifi+bt for the test plan; lora: drop the lock so
