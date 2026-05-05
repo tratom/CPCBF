@@ -4,11 +4,8 @@
     "board_type": "mkr_wifi_1010",
     "serial_port": "/dev/ttyACM_WIFI",
     "serial_baud": 115200,
-    "plans_subdir": "field/track_2_4ghz",
-    "firmware_dir": "/home/pi/cpcbf/field/firmware",
     "rounds": 10,
     "label": "field",
-    "ble_mac_peer": "D8:3A:DD:38:36:B9",
     "bridge_peer_bt_mac": "D8:3A:DD:38:36:B9",
     "essid": "CPCBF_MKR"
 }

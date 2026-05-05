@@ -1,0 +1,5 @@
+{
+    "_doc": "Pick which plan each track runs at next boot. Edit, then reboot both Pis (or `systemctl restart cpcbf-2_4ghz cpcbf-lora`). Set a track to null to skip it. Plan paths are relative to cpcbf/plans/field/; the .yaml suffix is optional. Both Pis must be on the same plan, with matching firmware already flashed on the matching MKR.",
+    "2_4ghz": "track_2_4ghz/01_ble_rssi",
+    "lora": "track_lora/01_lora_rssi"
+}

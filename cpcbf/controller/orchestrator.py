@@ -33,11 +33,13 @@ class Orchestrator:
         plan: TestPlan,
         hosts: dict[str, HostInfo],
         output_dir: Path,
+        rounds: int = 1,
     ):
         self.plan = plan
         self.hosts = hosts
         self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
+        self.rounds = rounds
 
     def _build_configure_params(
         self, test: TestSpec, payload_size: int, role: str, host_id: str
@@ -443,29 +445,34 @@ class Orchestrator:
 
             self._discover_ble_addrs(manager)
 
-            for test in self.plan.tests:
-                for payload_size in test.payload_sizes:
-                    try:
-                        result = self._run_single_test(
-                            manager, test, payload_size
-                        )
-                        if result:
-                            self._save_result(result)
-                    except Exception:
-                        logger.exception(
-                            "Test failed: %s payload=%d",
-                            test.name,
-                            payload_size,
-                        )
-                        # Clean up agents after failure
-                        for hid in manager.host_ids:
-                            try:
-                                manager.send(hid, {"command": "STOP"}, timeout=5.0)
-                            except Exception:
-                                pass
+            for round_idx in range(1, self.rounds + 1):
+                if self.rounds > 1:
+                    logger.info("=== Round %d/%d ===", round_idx, self.rounds)
 
-                    # Cooldown between tests
-                    logger.info("Cooling down for %ds...", test.cooldown_s)
-                    time.sleep(test.cooldown_s)
+                for test in self.plan.tests:
+                    for payload_size in test.payload_sizes:
+                        try:
+                            result = self._run_single_test(
+                                manager, test, payload_size
+                            )
+                            if result:
+                                result["round"] = round_idx
+                                self._save_result(result)
+                        except Exception:
+                            logger.exception(
+                                "Test failed: %s payload=%d",
+                                test.name,
+                                payload_size,
+                            )
+                            # Clean up agents after failure
+                            for hid in manager.host_ids:
+                                try:
+                                    manager.send(hid, {"command": "STOP"}, timeout=5.0)
+                                except Exception:
+                                    pass
+
+                        # Cooldown between tests
+                        logger.info("Cooling down for %ds...", test.cooldown_s)
+                        time.sleep(test.cooldown_s)
 
         logger.info("All tests complete. Results in %s", self.output_dir)

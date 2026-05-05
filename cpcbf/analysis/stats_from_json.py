@@ -350,16 +350,16 @@ def print_results(all_stats: list[RunStats]) -> None:
         for _, row in flood_df.sort_values("payload_size").iterrows():
             mean_bps = row.get("throughput_mean_bps")
             aborted = bool(row.get("early_aborted"))
-            if aborted:
-                # Run ended on timeout burst — throughput over end_us-start_us
-                # covers only the burst window, not the true test duration.
-                # Reporting a number here is misleading (e.g. 10 Mbps from an
-                # 11 ms burst on a 70-s run). Flag it instead.
-                mean_s = "ABORTED†"
-                std_s = "N/A"
-                ci_s = "N/A"
-                has_aborted = True
-            elif mean_bps is None or pd.isna(mean_bps):
+            # if aborted:
+            #     # Run ended on timeout burst — throughput over end_us-start_us
+            #     # covers only the burst window, not the true test duration.
+            #     # Reporting a number here is misleading (e.g. 10 Mbps from an
+            #     # 11 ms burst on a 70-s run). Flag it instead.
+            #     mean_s = "ABORTED†"
+            #     std_s = "N/A"
+            #     ci_s = "N/A"
+            #     has_aborted = True
+            if mean_bps is None or pd.isna(mean_bps): # WAS elif
                 # Aggregate-only flood (Arduino): no per-chunk stats
                 mean_s = fmt_throughput(row["throughput_bps"]) + "*"
                 std_s = "N/A"

@@ -50,12 +50,18 @@ udevadm trigger
 
 systemctl daemon-reload
 
+if [[ ! -f "${SCRIPT_DIR}/active_plans.json" ]]; then
+    echo "WARNING: ${SCRIPT_DIR}/active_plans.json missing — the runner will" \
+         "exit immediately. Create it before reboot."
+fi
+
 cat <<EOF
 Deployed as ${ROLE} (track=${TRACK}).
-  Role configs: ${SCRIPT_DIR}/role_2_4ghz.json, ${SCRIPT_DIR}/role_lora.json
-  Plans dir:    ${SCRIPT_DIR}/../plans/field/
-  Firmware bin: ${SCRIPT_DIR}/firmware/
-  Results dir:  ${SCRIPT_DIR}/results/
+  Role configs:   ${SCRIPT_DIR}/role_2_4ghz.json, ${SCRIPT_DIR}/role_lora.json
+  Active plans:   ${SCRIPT_DIR}/active_plans.json
+  Plans dir:      ${SCRIPT_DIR}/../plans/field/
+  Firmware bin:   ${SCRIPT_DIR}/firmware/
+  Results dir:    ${SCRIPT_DIR}/results/
 
 Next steps:
   1. Build firmware on the workstation and copy to ${SCRIPT_DIR}/firmware/:
@@ -63,5 +69,9 @@ Next steps:
        mkrwan1300_lora_{rssi,rtt,flood}.bin
   2. Verify runtime PIDs of attached MKR boards: lsusb
   3. Edit role_*.json to set bridge_peer_bt_mac (the OTHER RPi's BT MAC).
-  4. Reboot. Both units will start in parallel from systemd.
+  4. Edit active_plans.json to pick which plan each track runs at boot.
+  5. Flash the MKRs to match the active plan:
+       sudo python3 ${SCRIPT_DIR}/firmware_flash.py /dev/ttyACM_WIFI \\
+            mkrwifi1010_<plan> ${SCRIPT_DIR}/firmware /tmp/flash.log
+  6. Reboot. Both units will start in parallel, run their plan once, exit.
 EOF

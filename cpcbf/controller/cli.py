@@ -32,6 +32,14 @@ def main(argv: list[str] | None = None) -> None:
         help="Output directory for results (default: ./results)",
     )
     parser.add_argument(
+        "-r",
+        "--rounds",
+        type=int,
+        default=1,
+        help="Run the entire plan this many times (default: 1). "
+        "Each round appends to results.jsonl with a round=<N> field.",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -39,6 +47,8 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     args = parser.parse_args(argv)
+    if args.rounds < 1:
+        parser.error("--rounds must be >= 1")
 
     # Configure logging
     level = logging.DEBUG if args.verbose else logging.INFO
@@ -54,11 +64,12 @@ def main(argv: list[str] | None = None) -> None:
     plan.hosts = hosts
 
     logging.info(
-        "Loaded plan with %d tests, %d hosts", len(plan.tests), len(hosts)
+        "Loaded plan with %d tests, %d hosts, %d round(s)",
+        len(plan.tests), len(hosts), args.rounds,
     )
 
     # Run
-    orchestrator = Orchestrator(plan, hosts, args.output)
+    orchestrator = Orchestrator(plan, hosts, args.output, rounds=args.rounds)
     orchestrator.run()
 
 

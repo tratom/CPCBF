@@ -6,7 +6,7 @@ End-to-end guide for deploying the dual-track autonomous field rig:
 - 2× Arduino MKR WiFi 1010 (run BLE + WiFi tests on the 2.4 GHz track)
 - 2× Arduino MKR WAN 1300 (run LoRa tests on the 868 MHz track)
 
-Each RPi runs two systemd units in parallel: `cpcbf-2_4ghz.service` (BLE → WiFi on the MKR WiFi 1010) and `cpcbf-lora.service` (LoRa on the MKR WAN 1300). They synchronise via a Bluetooth bridge link between the two RPis after every firmware flash, and via the existing over-radio sync per round.
+Each RPi runs two systemd units in parallel: `cpcbf-2_4ghz.service` (BLE or WiFi on the MKR WiFi 1010) and `cpcbf-lora.service` (LoRa on the MKR WAN 1300). Each unit runs **one** plan per boot, for the configured number of rounds, then exits. To switch to a different plan: flash the matching firmware on the MKR (manually, with `firmware_flash.py`), edit `cpcbf/field/active_plans.json`, and reboot. The two RPis synchronise once per boot via a Bluetooth bridge link, and per round via the existing over-radio sync barrier.
 
 For the *why*, see `design-choices/auto-flasher-and-runner-arduino.md`.
 
@@ -38,7 +38,7 @@ For the *why*, see `design-choices/auto-flasher-and-runner-arduino.md`.
 
 ## 1. Workstation: build the 9 firmware binaries
 
-Each MKR firmware is split per (protocol × mode) so the SAMD21's 32 KB SRAM is enough. The autonomous runner reflashes between plans, so all 9 binaries must be present on the RPis.
+Each MKR firmware is split per (protocol × mode) so the SAMD21's 32 KB SRAM is enough. The runner doesn't flash anything itself; you flash manually before each boot using `firmware_flash.py` (step 8). All 9 binaries are still kept on the RPis so the manual flash is a one-liner.
 
 ```bash
 cd cpcbf/agent/platforms/arduino_mkr_wifi1010
@@ -112,11 +112,23 @@ There are four role-file templates in `cpcbf/field/`:
 On **each RPi**, edit the two role files for the role that RPi will play. Set:
 
 - `bridge_peer_bt_mac` — the **other** RPi's BT MAC (from step 2). Both tracks use the same value because the bridge-sync link is between the two RPi controllers, not per-board.
-- `ble_mac_peer` (in `*_2_4ghz.json` only) — the BT MAC of the **other** RPi's MKR WiFi 1010 NINA module. Read it once with: flash `mkrwifi1010_ble_rssi` to one MKR, run `screen /dev/ttyACM0 115200`, send `{"command":"BLE_SETUP"}`, copy the advertised MAC from the response.
-- `firmware_dir` — adjust if the repo isn't at `/home/pi/cpcbf`.
-- `label` — optional. Result files are tagged `<label>_<track>_rNN_<test>_<size>B_<role>.jsonl`.
+- `rounds` — how many times to repeat the plan in one boot.
+- `label` — optional. Result files are tagged `<label>_<track>_<plan>_rNN_<test>_<size>B_<role>.jsonl`.
+
+You do **not** need to set the MKR's BLE MAC — it's discovered at boot via `GET_BLE_ADDR` and exchanged through the bridge-sync manifest, so swapping MKRs doesn't require a config edit.
 
 Leave `serial_port` as `/dev/ttyACM_WIFI` and `/dev/ttyACM_WAN` — they're udev symlinks created by the rules in step 6.
+
+Then create `cpcbf/field/active_plans.json` (the file you'll edit between reboots — a default is shipped):
+
+```json
+{
+    "2_4ghz": "track_2_4ghz/01_ble_rssi",
+    "lora": "track_lora/01_lora_rssi"
+}
+```
+
+Plan paths are relative to `cpcbf/plans/field/`; the `.yaml` suffix is optional. Set a track to `null` to skip it for this boot. **Both Pis must have the same `active_plans.json`** — bridge_sync compares the plan name and aborts if they differ.
 
 ---
 
@@ -174,9 +186,27 @@ Edit `cpcbf/field/udev/99-cpcbf-mkr.rules` if needed, then `sudo udevadm control
 
 ---
 
-## 8. Smoke test (one round, before the full field run)
+## 8. Flash the MKRs and smoke-test one boot
 
-The fastest way to validate end-to-end is to keep the role files but lower `rounds: 10` to `rounds: 1` and only one plan in each track folder:
+For each plan you want to run, both RPis need the matching firmware on their MKRs first. The runner refuses to start (`FIRMWARE_MISMATCH` in the journal) if the on-disk marker at `/var/lib/cpcbf/flashed_<port>.txt` doesn't match the active plan's `firmware:` field.
+
+On **each RPi**, flash the firmware that matches what's in `active_plans.json`:
+
+```bash
+# 2.4 GHz track — flash the MKR WiFi 1010
+sudo python3 ~/common-bench/cpcbf/field/firmware_flash.py \
+    /dev/ttyACM_WIFI mkrwifi1010_ble_rssi \
+    ~/common-bench/cpcbf/field/firmware /tmp/flash.log
+
+# lora track — flash the MKR WAN 1300
+sudo python3 ~/common-bench/cpcbf/field/firmware_flash.py \
+    /dev/ttyACM_WAN mkrwan1300_lora_rssi \
+    ~/common-bench/cpcbf/field/firmware /tmp/flash.log
+```
+
+(The 2nd argument matches the plan YAML's `firmware:` field; the 3rd is the directory holding the `.bin`s; the 4th is a log path for `bossac` output.)
+
+Then start a single boot's worth of work:
 
 ```bash
 sudo systemctl start cpcbf-2_4ghz.service
@@ -186,47 +216,51 @@ sudo systemctl start cpcbf-lora.service
 sudo journalctl -fu cpcbf-2_4ghz -u cpcbf-lora
 ```
 
-You should see, in order, on both RPis:
+You should see, on both RPis, roughly:
 
 1. `[arbiter] {"track":"2_4ghz","event":"acquired",...}`
-2. `[01_ble_rssi] flashing mkrwifi1010_ble_rssi on /dev/ttyACM_WIFI`
-3. `[01_ble_rssi] bridge sync with D8:3A:DD:...`
-4. (test runs)
-5. `[arbiter] {"track":"2_4ghz","event":"released",...}`
-6. `[arbiter] {"track":"lora","event":"acquired",...}`
-7. `[01_lora_rssi] flashing mkrwan1300_lora_rssi on /dev/ttyACM_WAN`
-8. (test runs)
+2. `[01_ble_rssi] bridge sync with D8:3A:DD:...` (single PSM 0x81)
+3. `[arbiter] {"track":"2_4ghz","event":"released",...}` (immediately after sync)
+4. `[2_4ghz] waiting up to 60s for lora bridge_sync...` (only on the 2.4 GHz side)
+5. (rfkill blocks wifi+bt on the 2.4 GHz side; lora track's test runs in parallel)
+6. (the plan's tests run for `rounds` iterations)
+7. (rfkill unblocks; both units exit)
 
 Result files appear under `cpcbf/field/results/`:
 
 ```text
-field_2_4ghz_r01_ble_mkr1010_rssi_0B_sender.jsonl
-field_lora_r01_lora_mkr1300_rssi_32B_sender.jsonl
+field_2_4ghz_01_ble_rssi_r01_ble_mkr1010_rssi_0B_sender.jsonl
+field_lora_01_lora_rssi_r01_lora_mkr1300_rssi_32B_sender.jsonl
 …
 ```
 
-Check `rfkill list` while the 2.4 GHz unit is running its **test** phase: both wifi and bluetooth must be `Soft blocked: yes`. They're unblocked again before the next plan's flash.
-
-Restore the 10× `rounds` in the role files when smoke is good.
+Check `rfkill list` while the 2.4 GHz unit is running its **test** phase: both wifi and bluetooth must be `Soft blocked: yes`. They're unblocked when the unit exits.
 
 ---
 
-## 9. Field run
+## 9. Running another plan
 
-In the field, no Ethernet, no workstation. Power both RPis. systemd starts both units automatically. The ACT LED blinks (heartbeat) while any unit is active and goes solid-off when both finish.
+```bash
+# 1. on both RPis, flash the new firmware (e.g. switching to wifi_rssi)
+sudo python3 ~/cpcbf/cpcbf/field/firmware_flash.py \
+    /dev/ttyACM_WIFI mkrwifi1010_wifi_rssi \
+    ~/cpcbf/cpcbf/field/firmware /tmp/flash.log
 
-A full run:
+# 2. on both RPis, edit active_plans.json
+sed -i 's|track_2_4ghz/01_ble_rssi|track_2_4ghz/04_wifi_rssi|' \
+    ~/cpcbf/cpcbf/field/active_plans.json
 
-- 2.4 GHz track: 6 plans × 10 rounds × 3 modes (rssi/rtt/flood across BLE then WiFi) ≈ 60–90 min
-- LoRa track:    3 plans × 10 rounds                                                ≈ 30–60 min (driven mostly by EU868 duty-cycle)
+# 3. reboot (or just restart the units)
+sudo systemctl restart cpcbf-2_4ghz cpcbf-lora
+```
 
-Power-cycling mid-run is safe — `flock` releases on process exit, the rfkill `ExecStopPost` restores radios, and the persistent flash markers in `/var/lib/cpcbf/flashed_*.txt` skip already-correct firmwares on restart (so a partial run resumes near where it stopped at plan boundaries).
+A single boot's runtime depends only on `rounds × tests-per-plan`; expect a few minutes per plan with the default `rounds: 10`. Power-cycling mid-run is safe — `flock` releases on process exit, the rfkill `ExecStopPost` restores radios, and the persistent flash markers in `/var/lib/cpcbf/flashed_*.txt` mean the next boot won't re-flash unless you ask it to.
 
 ---
 
 ## 10. Collect and analyse results
 
-After both units are done (`systemctl status cpcbf-2_4ghz.service` shows `inactive (dead)` with `RemainAfterExit=yes`), pull the JSONLs back:
+After both units are done (`systemctl status cpcbf-2_4ghz.service` shows `inactive (dead)` — the units run with `RemainAfterExit=no` so they go fully inactive on exit), pull the JSONLs back:
 
 ```bash
 rsync -av pi@<rpi-sender-ip>:~/cpcbf/cpcbf/field/results/ ./results/sender/
@@ -241,13 +275,17 @@ python3 analysis/run_analysis.py --results ./results/merged/results.jsonl --outp
 
 ## Troubleshooting
 
-**`bossac: No device found on /dev/ttyACM…`** — the 1200-baud touch failed to enter the bootloader. The runner's `flash_with_retry` does a double-tap on retry; if that still fails, press the MKR's reset button twice in quick succession to manually arm the bootloader, then `systemctl restart cpcbf-2_4ghz`.
+**`FIRMWARE_MISMATCH expected=X actual=Y`** — the on-disk flash marker doesn't match the active plan's `firmware:` field. Either flash the right firmware (step 8) or edit `active_plans.json` to point at a plan that matches what's currently on the MKR. The runner exits non-zero rather than running tests against the wrong firmware.
 
-**Bridge sync hangs at `connect`** — confirm the *other* RPi's BT controller is powered (`bluetoothctl show`). The `cpcbf-2_4ghz` unit blocks BT during test execution; sync only happens between plans, when BT is unblocked. If both RPis are simultaneously trying to be sender (config error), sync will time out.
+**`bossac: No device found on /dev/ttyACM…`** during a manual `firmware_flash.py` run — the 1200-baud touch failed to enter the bootloader. `flash_with_retry` double-taps on retry; if that still fails, press the MKR's reset button twice in quick succession to manually arm the bootloader, then re-run the flash command.
 
-**`PLAN_SKIPPED` in journald** — flash or bridge sync failed on this RPi. The peer's identical retry timing means schedules tend to realign; the radio-side `idx_mismatch` recovery will skip the plan on the other RPi too. Check `/tmp/cpcbf_flash.log` for bossac output and `journalctl -u cpcbf-…` for the failure phase.
+**`BRIDGE_SYNC_FAILED ... could not connect ... within 60s`** — the peer Pi isn't reachable on PSM 0x81. Confirm the other RPi's BT controller is up (`bluetoothctl show`) and that page-scan is enabled (`hciconfig hci0` should show `ISCAN`; `ExecStartPre=hciconfig hci0 piscan` in the unit handles this at boot). The runner retries up to 4 times with arbiter release in between, then exits.
 
-**Both tracks try to acquire BT simultaneously** — by design, only one acquires at a time (`fcntl.flock`-based exclusion in `bluetooth_control_arbiter.py`). If you observe interleaved `acquired` events without `released` between, something is wrong with the lock file in `/var/lib/cpcbf/` — clear it (`sudo rm /var/lib/cpcbf/bluetooth_control.lock /var/lib/cpcbf/lora_pending.flag`) and restart both units.
+**`BRIDGE_SYNC_FAILED ... manifest mismatch on 'plan'`** — the two Pis disagree on the active plan. Check that `cpcbf/field/active_plans.json` is identical on both Pis (and that the plan name matches an existing YAML in `cpcbf/plans/field/`).
+
+**Both tracks try to acquire BT simultaneously** — by design, only one acquires at a time (`fcntl.flock`-based exclusion in `bluetooth_control_arbiter.py`). The mutex is held only around the brief bridge_sync window. If you suspect a stuck lock, `sudo rm /var/lib/cpcbf/bluetooth_control.lock` and restart the units.
+
+**`[2_4ghz] lora bridge_sync flag not fresh — proceeding anyway`** — the 2.4 GHz unit waited up to 60 s for lora's `/var/lib/cpcbf/lora_bridge_sync_done` flag (stamped with the current boot_id) and didn't see it. Either lora wasn't configured for this boot (`active_plans.json` has `"lora": null`), or its bridge_sync took too long, or the unit failed early. The 2.4 GHz unit proceeds with rfkill anyway, but if lora is still mid-sync that will fail.
 
 **Wi-Fi/BT stays blocked after a crash** — `ExecStopPost=/usr/sbin/rfkill unblock all` should always restore. If you killed the unit with `SIGKILL`, `ExecStopPost` may be skipped — manually `sudo rfkill unblock all` and `sudo systemctl start NetworkManager`.
 

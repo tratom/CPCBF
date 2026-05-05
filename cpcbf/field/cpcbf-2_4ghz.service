@@ -1,5 +1,5 @@
 [Unit]
-Description=CPCBF Autonomous Benchmark — 2.4GHz Track (BLE + WiFi on MKR WiFi 1010)
+Description=CPCBF Field Benchmark — 2.4GHz Track (BLE + WiFi on MKR WiFi 1010)
 After=multi-user.target bluetooth.service
 Wants=multi-user.target bluetooth.service
 
@@ -12,7 +12,7 @@ ExecStopPost=/usr/sbin/rfkill unblock all
 ExecStopPost=/bin/systemctl start NetworkManager
 StandardOutput=journal
 StandardError=journal
-RemainAfterExit=yes
+RemainAfterExit=no
 TimeoutStartSec=infinity
 
 [Install]

@@ -52,7 +52,11 @@ def _write_marker(runtime_port: str, env: str) -> None:
 
 
 def _marker_path(runtime_port: str) -> str:
-    base = os.path.basename(os.path.realpath(runtime_port)) or os.path.basename(runtime_port)
+    # Key on the input path's basename (e.g. "ttyACM_WIFI" for the udev
+    # symlink), NOT the realpath. The kernel can renumber the backing
+    # /dev/ttyACMN node across a 1200-baud touch + bossac re-enumerate,
+    # so the realpath isn't stable; the udev symlink IS.
+    base = os.path.basename(runtime_port)
     return os.path.join(MARKER_DIR, f"flashed_{base}.txt")
 
 
@@ -207,3 +211,32 @@ def flash_with_retry(port: str, env: str, firmware_dir: str, log_path: str,
                 time.sleep(cooldown_s)
     assert last_err is not None
     raise last_err
+
+
+def _main():
+    import argparse
+    p = argparse.ArgumentParser(
+        description="Flash a prebuilt MKR firmware via 1200-baud touch + bossac.",
+    )
+    p.add_argument("port", help="runtime serial port (e.g. /dev/ttyACM_WIFI)")
+    p.add_argument("env", help="firmware basename without .bin "
+                               "(e.g. mkrwifi1010_ble_rssi)")
+    p.add_argument("firmware_dir", nargs="?",
+                   default=os.path.join(os.path.dirname(__file__), "firmware"),
+                   help="dir holding <env>.bin (default: ./firmware)")
+    p.add_argument("log_path", nargs="?", default="/tmp/cpcbf_flash.log",
+                   help="bossac output log (default: /tmp/cpcbf_flash.log)")
+    p.add_argument("--force", action="store_true",
+                   help="reflash even if the marker says <env> is current")
+    p.add_argument("--attempts", type=int, default=3)
+    args = p.parse_args()
+    flash_with_retry(args.port, args.env, args.firmware_dir, args.log_path,
+                     attempts=args.attempts)
+    if args.force:
+        # flash_with_retry skips on marker match; force path goes through flash().
+        flash(args.port, args.env, args.firmware_dir, args.log_path, force=True)
+    print(f"flashed {args.env} on {args.port}")
+
+
+if __name__ == "__main__":
+    _main()

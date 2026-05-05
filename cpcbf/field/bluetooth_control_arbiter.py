@@ -1,19 +1,15 @@
-"""Cross-process arbiter for the shared RPi Bluetooth control interface.
+"""Cross-process mutex around the shared RPi Bluetooth controller.
 
-Track A (2_4ghz) and Track B (lora) run as separate systemd units, so an
-in-process Lock is insufficient. Backed by fcntl.flock on
-/var/lib/cpcbf/bluetooth_control.lock — POSIX advisory lock, kernel
-auto-releases on process exit (crash-safe).
+The 2_4ghz and lora services run as separate systemd units on each RPi
+but share the single built-in BT controller for the brief bridge_sync
+window at boot. This module is a plain `flock`-based mutex that
+serialises that window. No fairness, no priority, no plan-boundary
+yielding — the v2 single-plan-per-boot runner does at most one
+bridge_sync per service per boot, so contention is bounded to a few
+seconds total.
 
-Fairness:
-  - 2_4ghz holds the lock for the duration of (flash + bridge_sync + test
-    plan execution + rfkill restore). At each plan boundary it RELEASES,
-    sleeps a 5 s grace window, and only then re-acquires. If the lora
-    track is pending it will grab the lock during that window.
-  - lora announces intent by touching /var/lib/cpcbf/lora_pending.flag
-    BEFORE blocking on the lock. Once it acquires, it removes the flag.
-  - 2_4ghz checks for the flag at boundaries and waits until it clears
-    (60 s ceiling) before re-acquiring.
+Backed by fcntl.flock on /var/lib/cpcbf/bluetooth_control.lock — POSIX
+advisory lock, kernel auto-releases on process exit (crash-safe).
 """
 from __future__ import annotations
 
@@ -29,10 +25,6 @@ from typing import Optional
 
 STATE_DIR = "/var/lib/cpcbf"
 LOCK_PATH = os.path.join(STATE_DIR, "bluetooth_control.lock")
-PENDING_FLAG = os.path.join(STATE_DIR, "lora_pending.flag")
-
-GRACE_S = 5.0
-PENDING_CEILING_S = 60.0
 
 
 def _ensure_state_dir() -> None:
@@ -53,38 +45,12 @@ class BluetoothControlArbiter:
         self._fd: Optional[int] = None
         _ensure_state_dir()
 
-    def _open_lock(self) -> int:
-        return os.open(LOCK_PATH, os.O_RDWR | os.O_CREAT, 0o644)
-
-    def _set_pending(self) -> None:
-        try:
-            with open(PENDING_FLAG, "w") as f:
-                f.write(str(os.getpid()))
-        except OSError:
-            pass
-
-    def _clear_pending(self) -> None:
-        try:
-            os.unlink(PENDING_FLAG)
-        except FileNotFoundError:
-            pass
-
-    def _pending_present(self) -> bool:
-        return os.path.exists(PENDING_FLAG)
-
     def acquire(self, blocking: bool = True, timeout: Optional[float] = None) -> bool:
-        """Acquire the BT control lock. Returns True on success.
-
-        With blocking=False this returns immediately; with blocking=True and
-        timeout=None it waits forever (kernel-blocking flock).
-        """
+        """Acquire the BT control lock. Returns True on success."""
         if self._fd is not None:
             return True
 
-        if self.track == "lora":
-            self._set_pending()
-
-        fd = self._open_lock()
+        fd = os.open(LOCK_PATH, os.O_RDWR | os.O_CREAT, 0o644)
         flags = fcntl.LOCK_EX | (fcntl.LOCK_NB if not blocking else 0)
         deadline = (time.monotonic() + timeout) if timeout is not None else None
 
@@ -92,8 +58,6 @@ class BluetoothControlArbiter:
             try:
                 fcntl.flock(fd, flags)
                 self._fd = fd
-                if self.track == "lora":
-                    self._clear_pending()
                 _log(self.track, "acquired", pid=os.getpid())
                 return True
             except OSError as e:
@@ -105,8 +69,6 @@ class BluetoothControlArbiter:
                     return False
                 if deadline is not None and time.monotonic() >= deadline:
                     os.close(fd)
-                    if self.track == "lora":
-                        self._clear_pending()
                     return False
                 time.sleep(0.2)
 
@@ -119,30 +81,6 @@ class BluetoothControlArbiter:
             os.close(self._fd)
             self._fd = None
             _log(self.track, "released", pid=os.getpid())
-
-    def yield_at_boundary(self) -> None:
-        """2_4ghz hook: release, give lora a window, then re-acquire.
-
-        No-op for the lora track. Honours PENDING_CEILING_S so a stuck lora
-        process can't starve the 2_4ghz schedule indefinitely.
-        """
-        if self.track != "2_4ghz":
-            return
-
-        had_lock = self._fd is not None
-        self.release()
-        time.sleep(GRACE_S)
-
-        if self._pending_present():
-            _log("2_4ghz", "yield_wait", reason="lora_pending")
-            wait_deadline = time.monotonic() + PENDING_CEILING_S
-            while self._pending_present() and time.monotonic() < wait_deadline:
-                time.sleep(0.5)
-            # Always allow the lora task to finish whatever it grabbed; we
-            # then re-acquire below as normal.
-
-        if had_lock:
-            self.acquire(blocking=True)
 
     @contextlib.contextmanager
     def held(self, blocking: bool = True, timeout: Optional[float] = None):

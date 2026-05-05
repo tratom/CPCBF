@@ -14,5 +14,5 @@ tests:
     protocol: lora
     board: mkr_wan_1300
     repetitions: 100
-    inter_packet_us: 1000000
+    inter_packet_us: 110000
     payload_sizes: [32]

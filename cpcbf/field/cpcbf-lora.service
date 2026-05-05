@@ -1,5 +1,5 @@
 [Unit]
-Description=CPCBF Autonomous Benchmark — LoRa Track (MKR WAN 1300)
+Description=CPCBF Field Benchmark — LoRa Track (MKR WAN 1300)
 After=multi-user.target bluetooth.service
 Wants=multi-user.target bluetooth.service
 
@@ -8,9 +8,10 @@ Type=oneshot
 Environment=PYTHONUNBUFFERED=1
 ExecStartPre=/bin/sh -c '/usr/bin/hciconfig hci0 up; /usr/bin/hciconfig hci0 piscan'
 ExecStart=/usr/bin/python3 __SCRIPT_DIR__/auto_bench.py __SCRIPT_DIR__/role_lora.json
+ExecStopPost=/usr/sbin/rfkill unblock all
 StandardOutput=journal
 StandardError=journal
-RemainAfterExit=yes
+RemainAfterExit=no
 TimeoutStartSec=infinity
 
 [Install]
