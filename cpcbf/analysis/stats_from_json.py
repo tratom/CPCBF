@@ -10,14 +10,22 @@ Where <path> is a .jsonl file or a directory containing .jsonl files.
 
 from __future__ import annotations
 
+import argparse
+import glob
 import json
+import os
+import re
 import sys
+import warnings
 from dataclasses import dataclass, asdict
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from scipy import stats as sp_stats
+
+# Suppress pandas warning about raw DBAPI2 connections
+warnings.filterwarnings("ignore", category=UserWarning, message=".*pandas only supports SQLAlchemy connectable.*")
 
 
 @dataclass
@@ -47,6 +55,85 @@ class RunStats:
     throughput_std_bps: float | None
     throughput_ci95_low_bps: float | None
     throughput_ci95_high_bps: float | None
+
+
+def merge_receiver_rssi(sender_data: dict, receiver_data: dict) -> dict:
+    """Merge receiver RSSI values into sender packets by seq number (from merge_results.py)."""
+    # Build seq -> rssi lookup from receiver packets
+    rssi_by_seq = {}
+    for p in receiver_data.get("packets", []):
+        rssi = p.get("rssi", 0)
+        if rssi != 0:
+            rssi_by_seq[p["seq"]] = rssi
+
+    # Patch sender packets: fill in RSSI where sender has none
+    for p in sender_data.get("packets", []):
+        if p.get("rssi", 0) == 0 and p["seq"] in rssi_by_seq:
+            p["rssi"] = rssi_by_seq[p["seq"]]
+
+    return sender_data
+
+
+def merge_and_save_records(results_dir: Path, output_file: Path) -> list[dict]:
+    """Merge field result files and save to disk, returning the merged records."""
+    files = glob.glob(os.path.join(results_dir, "*.jsonl"))
+    groups = {}
+    for path in files:
+        basename = os.path.basename(path)
+        match = re.match(r"(.+)_(sender|receiver)\.jsonl$", basename)
+        if not match:
+            continue
+        test_key = match.group(1)
+        role = match.group(2)
+        groups.setdefault(test_key, {})[role] = path
+
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    merged_records = []
+
+    print(f"Merging {len(groups)} test runs from {results_dir}...")
+    with open(output_file, "w") as out:
+        for test_key in sorted(groups):
+            pair = groups[test_key]
+            sides = {}
+            meta = {}
+            for role in ("sender", "receiver"):
+                if role not in pair:
+                    continue
+                with open(pair[role]) as f:
+                    data = json.loads(f.readline())
+                sides[role] = data.pop(role, {})
+                if not meta:
+                    meta = data
+
+            mode = meta.get("mode", "ping_pong")
+            sender_data = sides.get("sender", {})
+            receiver_data = sides.get("receiver", {})
+
+            if mode == "ping_pong" and receiver_data:
+                sender_data = merge_receiver_rssi(sender_data, receiver_data)
+
+            combined = {
+                "test_name": meta.get("test_name", test_key),
+                "mode": mode,
+                "protocol": meta.get("protocol", "wifi"),
+                "board": meta.get("board", "rpi4"),
+                "payload_size": meta.get("payload_size"),
+                "repetitions": meta.get("repetitions"),
+                "warmup": meta.get("warmup"),
+                "topology": meta.get("topology", "p2p"),
+                "sender": sender_data,
+                "receiver": receiver_data,
+                "clock_offset_us": None,
+                "timestamp": meta.get("timestamp"),
+            }
+            json.dump(combined, out)
+            out.write("\n")
+            merged_records.append(combined)
+            present = "+".join(sorted(pair.keys()))
+            print(f"  {test_key} ({present})")
+
+    print(f"\nMerged results saved to {output_file}")
+    return merged_records
 
 
 def _compute_chunk_throughput_stats(
@@ -293,110 +380,108 @@ def fmt_throughput(bps: float | None) -> str:
 def print_results(all_stats: list[RunStats]) -> None:
     """Print formatted output matching run_analysis.py steps 2–3."""
     df = pd.DataFrame([asdict(s) for s in all_stats])
+    if df.empty:
+        print("  No valid runs found.")
+        return
 
-    # ── Ping-Pong (RTT) Results ──
-    rtt_df = df[df["mode"] == "ping_pong"]
-    if not rtt_df.empty:
+    for protocol, proto_df in df.groupby("protocol"):
         print()
-        print("── Ping-Pong (RTT) Results ──")
-        print()
-        fmt = "{:<10} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:>8} {:>10}"
-        print(fmt.format(
-            "Payload", "Samples", "Mean(us)", "Med(us)",
-            "Std(us)", "P95(us)", "P99(us)", "Loss%", "Jitter(us)",
-        ))
-        print("-" * 105)
-        for _, row in rtt_df.sort_values("payload_size").iterrows():
+        print(f"── {protocol} " + "─" * (50 - len(str(protocol))))
+
+        # ── Ping-Pong (RTT) Results ──
+        rtt_df = proto_df[proto_df["mode"] == "ping_pong"]
+        if not rtt_df.empty:
+            print()
+            print("  ── Ping-Pong (RTT) Results ──")
+            print()
+            fmt = "  {:<10} {:>8} {:>10} {:>10} {:>10} {:>10} {:>10} {:>8} {:>10}"
             print(fmt.format(
-                f"{int(row['payload_size'])}B",
-                int(row["packets_measured"]),
-                f"{row['rtt_mean_us']:.0f}" if row["rtt_mean_us"] else "N/A",
-                f"{row['rtt_median_us']:.0f}" if row["rtt_median_us"] else "N/A",
-                f"{row['rtt_std_us']:.0f}" if row["rtt_std_us"] else "N/A",
-                f"{row['rtt_p95_us']:.0f}" if row["rtt_p95_us"] else "N/A",
-                f"{row['rtt_p99_us']:.0f}" if row["rtt_p99_us"] else "N/A",
-                f"{row['packet_loss_pct']:.1f}",
-                f"{row['jitter_us']:.0f}" if row["jitter_us"] else "N/A",
+                "Payload", "Samples", "Mean(us)", "Med(us)",
+                "Std(us)", "P95(us)", "P99(us)", "Loss%", "Jitter(us)",
             ))
-
-        # 95% Confidence Intervals
-        print()
-        print("── 95% Confidence Intervals ──")
-        print()
-        fmt_ci = "{:<10} {:>15} {:>15} {:>15}"
-        print(fmt_ci.format("Payload", "CI95 Low(us)", "CI95 High(us)", "Width(us)"))
-        print("-" * 60)
-        for _, row in rtt_df.sort_values("payload_size").iterrows():
-            if row["rtt_ci95_low"] and row["rtt_ci95_high"]:
-                width = row["rtt_ci95_high"] - row["rtt_ci95_low"]
-                print(fmt_ci.format(
+            print("  " + "-" * 103)
+            for _, row in rtt_df.sort_values("payload_size").iterrows():
+                print(fmt.format(
                     f"{int(row['payload_size'])}B",
-                    f"{row['rtt_ci95_low']:.0f}",
-                    f"{row['rtt_ci95_high']:.0f}",
-                    f"{width:.0f}",
+                    int(row["packets_measured"]),
+                    f"{row['rtt_mean_us']:.0f}" if row["rtt_mean_us"] else "N/A",
+                    f"{row['rtt_median_us']:.0f}" if row["rtt_median_us"] else "N/A",
+                    f"{row['rtt_std_us']:.0f}" if row["rtt_std_us"] else "N/A",
+                    f"{row['rtt_p95_us']:.0f}" if row["rtt_p95_us"] else "N/A",
+                    f"{row['rtt_p99_us']:.0f}" if row["rtt_p99_us"] else "N/A",
+                    f"{row['packet_loss_pct']:.1f}",
+                    f"{row['jitter_us']:.0f}" if row["jitter_us"] else "N/A",
                 ))
 
-    # ── Flood (Throughput) Results ──
-    flood_df = df[df["mode"] == "flood"]
-    if not flood_df.empty:
-        print()
-        print("── Flood (Throughput) Results ──")
-        print()
-        fmt_f = "{:<10} {:>8} {:>14} {:>14} {:>14} {:>10} {:>8}"
-        print(fmt_f.format("Payload", "Samples", "Mean TP", "Std TP", "95% CI", "Loss%", "CRC Err%"))
-        print("-" * 95)
-        has_aggregate_only = False
-        has_aborted = False
-        for _, row in flood_df.sort_values("payload_size").iterrows():
-            mean_bps = row.get("throughput_mean_bps")
-            aborted = bool(row.get("early_aborted"))
-            # if aborted:
-            #     # Run ended on timeout burst — throughput over end_us-start_us
-            #     # covers only the burst window, not the true test duration.
-            #     # Reporting a number here is misleading (e.g. 10 Mbps from an
-            #     # 11 ms burst on a 70-s run). Flag it instead.
-            #     mean_s = "ABORTED†"
-            #     std_s = "N/A"
-            #     ci_s = "N/A"
-            #     has_aborted = True
-            if mean_bps is None or pd.isna(mean_bps): # WAS elif
-                # Aggregate-only flood (Arduino): no per-chunk stats
-                mean_s = fmt_throughput(row["throughput_bps"]) + "*"
-                std_s = "N/A"
-                ci_s = "N/A"
-                has_aggregate_only = True
-            else:
-                mean_s = fmt_throughput(mean_bps)
-                std_s = fmt_throughput(row["throughput_std_bps"])
-                if row["throughput_ci95_low_bps"] and row["throughput_ci95_high_bps"]:
-                    ci_s = f"[{fmt_throughput(row['throughput_ci95_low_bps'])}, {fmt_throughput(row['throughput_ci95_high_bps'])}]"
-                else:
-                    ci_s = "N/A"
-            print(fmt_f.format(
-                f"{int(row['payload_size'])}B",
-                int(row["packets_measured"]),
-                mean_s,
-                std_s,
-                ci_s,
-                f"{row['packet_loss_pct']:.1f}",
-                f"{row['crc_error_pct']:.1f}",
-            ))
-        if has_aggregate_only:
-            print("* = aggregate throughput only (no per-chunk data)")
-        if has_aborted:
-            print("† = run aborted early (receiver hit MAX_CONSECUTIVE_TIMEOUTS); "
-                  "throughput suppressed as the recv window only covers the initial burst")
+            # 95% Confidence Intervals
+            print()
+            print("  ── 95% Confidence Intervals ──")
+            print()
+            fmt_ci = "  {:<10} {:>15} {:>15} {:>15}"
+            print(fmt_ci.format("Payload", "CI95 Low(us)", "CI95 High(us)", "Width(us)"))
+            print("  " + "-" * 58)
+            for _, row in rtt_df.sort_values("payload_size").iterrows():
+                if row["rtt_ci95_low"] and row["rtt_ci95_high"]:
+                    width = row["rtt_ci95_high"] - row["rtt_ci95_low"]
+                    print(fmt_ci.format(
+                        f"{int(row['payload_size'])}B",
+                        f"{row['rtt_ci95_low']:.0f}",
+                        f"{row['rtt_ci95_high']:.0f}",
+                        f"{width:.0f}",
+                    ))
 
-    # ── RSSI Summary ──
-    rssi_rows = df[df["rssi_mean"].notna()]
-    if not rssi_rows.empty:
-        print()
-        print("── RSSI Summary ──")
-        print()
-        for _, row in rssi_rows.iterrows():
-            std_str = f", std={row['rssi_std']:.1f}" if pd.notna(row["rssi_std"]) else ""
-            print(f"  {row['test_name']} ({int(row['payload_size'])}B): "
-                  f"mean={row['rssi_mean']:.1f} dBm{std_str}")
+        # ── Flood (Throughput) Results ──
+        flood_df = proto_df[proto_df["mode"] == "flood"]
+        if not flood_df.empty:
+            print()
+            print("  ── Flood (Throughput) Results ──")
+            print()
+            fmt_f = "  {:<10} {:>8} {:>14} {:>14} {:>14} {:>10} {:>8}"
+            print(fmt_f.format("Payload", "Samples", "Mean TP", "Std TP", "95% CI", "Loss%", "CRC Err%"))
+            print("  " + "-" * 93)
+            has_aggregate_only = False
+            has_aborted = False
+            for _, row in flood_df.sort_values("payload_size").iterrows():
+                mean_bps = row.get("throughput_mean_bps")
+                aborted = bool(row.get("early_aborted"))
+                if mean_bps is None or pd.isna(mean_bps):
+                    # Aggregate-only flood (Arduino): no per-chunk stats
+                    mean_s = fmt_throughput(row["throughput_bps"]) + "*"
+                    std_s = "N/A"
+                    ci_s = "N/A"
+                    has_aggregate_only = True
+                else:
+                    mean_s = fmt_throughput(mean_bps)
+                    std_s = fmt_throughput(row["throughput_std_bps"])
+                    if row["throughput_ci95_low_bps"] and row["throughput_ci95_high_bps"]:
+                        ci_s = f"[{fmt_throughput(row['throughput_ci95_low_bps'])}, {fmt_throughput(row['throughput_ci95_high_bps'])}]"
+                    else:
+                        ci_s = "N/A"
+                print(fmt_f.format(
+                    f"{int(row['payload_size'])}B",
+                    int(row["packets_measured"]),
+                    mean_s,
+                    std_s,
+                    ci_s,
+                    f"{row['packet_loss_pct']:.1f}",
+                    f"{row['crc_error_pct']:.1f}",
+                ))
+            if has_aggregate_only:
+                print("  * = aggregate throughput only (no per-chunk data)")
+            if has_aborted:
+                print("  † = run aborted early (receiver hit MAX_CONSECUTIVE_TIMEOUTS); "
+                      "throughput suppressed as the recv window only covers the initial burst")
+
+        # ── RSSI Summary ──
+        rssi_rows = proto_df[proto_df["rssi_mean"].notna()]
+        if not rssi_rows.empty:
+            print()
+            print("  ── RSSI Summary ──")
+            print()
+            for _, row in rssi_rows.iterrows():
+                std_str = f", std={row['rssi_std']:.1f}" if pd.notna(row["rssi_std"]) else ""
+                print(f"    {row['test_name']} ({int(row['payload_size'])}B): "
+                      f"mean={row['rssi_mean']:.1f} dBm{std_str}")
 
     # ── Comparison Table ──
     print()
@@ -411,7 +496,7 @@ def print_results(all_stats: list[RunStats]) -> None:
         "rssi_mean",
     ]
     available = [c for c in cols if c in df.columns]
-    table = df[available].sort_values(["test_name", "payload_size"])
+    table = df[available].sort_values(["protocol", "test_name", "payload_size"])
     print(table.to_string(index=False))
     print()
 
@@ -443,23 +528,40 @@ def _print_metadata_header(path: Path) -> None:
 
 
 def main():
-    if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} <jsonl-file-or-directory>")
+    parser = argparse.ArgumentParser(description="Quick JSONL analysis (same rich output as run_analysis.py)")
+    parser.add_argument("path", type=Path, help="JSONL file or directory containing .jsonl files")
+    parser.add_argument("--merge", action="store_true", help="Merge split field result files before analysis")
+    parser.add_argument("--output", type=Path, default=Path("results/results.jsonl"),
+                        help="Output merged JSONL file path (default: results/results.jsonl)")
+    parser.add_argument("--protocol", type=str, default=None, help="Filter by protocol (e.g. wifi, ble)")
+    args = parser.parse_args()
+
+    if not args.path.exists():
+        print(f"Error: {args.path} not found")
         sys.exit(1)
 
-    path = Path(sys.argv[1])
-    if not path.exists():
-        print(f"Error: {path} not found")
-        sys.exit(1)
+    _print_metadata_header(args.path)
 
-    _print_metadata_header(path)
+    if args.merge:
+        if not args.path.is_dir():
+            print("Error: --merge requires a directory path containing _sender/_receiver.jsonl files")
+            sys.exit(1)
+        records = merge_and_save_records(args.path, args.output)
+    else:
+        records = collect_records(args.path)
 
-    records = collect_records(path)
     if not records:
         print("No JSONL records found.")
         sys.exit(1)
 
-    print(f"Loaded {len(records)} test runs from {path}")
+    # Filter by protocol if requested
+    if args.protocol:
+        records = [r for r in records if r.get("protocol") == args.protocol]
+        if not records:
+            print(f"No records found for protocol: {args.protocol}")
+            sys.exit(1)
+
+    print(f"Processing {len(records)} test runs...")
 
     all_stats = [compute_stats_from_record(rec) for rec in records]
     print_results(all_stats)

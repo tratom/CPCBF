@@ -40,6 +40,14 @@ def main(argv: list[str] | None = None) -> None:
         "Each round appends to results.jsonl with a round=<N> field.",
     )
     parser.add_argument(
+        "-F",
+        "--flash",
+        action="store_true",
+        help="If the MKR firmware marker doesn't match the plan's "
+        "`firmware:` field, flash it via the bridge RPi before running. "
+        "Without this, mismatches abort with FIRMWARE_MISMATCH.",
+    )
+    parser.add_argument(
         "-v",
         "--verbose",
         action="store_true",
@@ -69,7 +77,9 @@ def main(argv: list[str] | None = None) -> None:
     )
 
     # Run
-    orchestrator = Orchestrator(plan, hosts, args.output, rounds=args.rounds)
+    orchestrator = Orchestrator(
+        plan, hosts, args.output, rounds=args.rounds, flash=args.flash,
+    )
     orchestrator.run()
 
 

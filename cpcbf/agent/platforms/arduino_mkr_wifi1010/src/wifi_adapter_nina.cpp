@@ -40,6 +40,12 @@ static int nina_init(protocol_adapter_t *self, const adapter_config_t *cfg)
             platform_log("nina: AP start failed, status=%d", status);
             return ADAPTER_ERR_INIT;
         }
+        /* WL_AP_LISTENING means the chip is set up to beacon, not that it
+         * has emitted one yet. NINA-W102 takes ~1 s before the first beacon
+         * goes out; if the STA scans inside that window WiFi.begin() can
+         * sit for the full 30 s timeout and return WL_CONNECT_FAILED. Wait
+         * once here so receivers always see the SSID on their first scan. */
+        delay(1500);
         /* AP IP is always 192.168.4.1 on WiFiNINA */
         s_nina.peer_ip.fromString(cfg->peer_addr[0] ? cfg->peer_addr : "192.168.4.2");
         platform_log("nina: AP started, peer=%s", cfg->peer_addr);

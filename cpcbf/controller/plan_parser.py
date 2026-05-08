@@ -24,6 +24,10 @@ def _merge_defaults(global_cfg: GlobalConfig, gc_raw: dict, test_dict: dict) -> 
         "cooldown_s": global_cfg.cooldown_s,
         "ble_phy": global_cfg.ble_phy,
         "essid": global_cfg.essid,
+        "lora_tx_power_dbm": global_cfg.lora_tx_power_dbm,
+        "lora_sf": global_cfg.lora_sf,
+        "lora_bw_hz": global_cfg.lora_bw_hz,
+        "lora_cr": global_cfg.lora_cr,
     }
     # Start from dataclass defaults, layer test values, then global overrides
     merged = {**defaults, **test_dict, **{k: defaults[k] for k in gc_raw if k in defaults}}
@@ -71,7 +75,8 @@ def parse_plan(plan_path: str | Path) -> TestPlan:
         mode = TestMode(merged.pop("mode"))
         tests.append(TestSpec(mode=mode, **merged))
 
-    plan = TestPlan(global_config=global_cfg, tests=tests)
+    firmware = raw.get("firmware")
+    plan = TestPlan(global_config=global_cfg, tests=tests, firmware=firmware)
     _validate_plan(plan)
     return plan
 

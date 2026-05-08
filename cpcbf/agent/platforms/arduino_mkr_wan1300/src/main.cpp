@@ -82,6 +82,12 @@ static void handle_configure(JsonObject params)
             g_adapter_cfg.role = ROLE_RECEIVER;
     }
 
+    /* LoRa runtime overrides — sentinel values mean "use config.h default". */
+    g_adapter_cfg.lora_tx_power_dbm = (int8_t)(params["lora_tx_power_dbm"] | (int)LORA_TX_POWER_UNSET);
+    g_adapter_cfg.lora_sf           = (uint8_t)(params["lora_sf"]    | 0);
+    g_adapter_cfg.lora_bw_hz        = (uint32_t)(params["lora_bw_hz"]| 0UL);
+    g_adapter_cfg.lora_cr           = (uint8_t)(params["lora_cr"]    | 0);
+
     /* Tear down previous adapter before reconfiguring */
     if (g_adapter_ready && g_active_adapter) {
         g_active_adapter->deinit(g_active_adapter);

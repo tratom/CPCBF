@@ -15,5 +15,5 @@ tests:
     protocol: wifi
     board: mkr_wifi_1010
     repetitions: 100
-    inter_packet_us: 100000
+    inter_packet_us: 50000
     payload_sizes: [0]

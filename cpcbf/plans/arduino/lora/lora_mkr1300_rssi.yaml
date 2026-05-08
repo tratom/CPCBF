@@ -4,6 +4,11 @@ global:
   warmup: 10
   timeout_ms: 5000
   cooldown_s: 15
+  # LoRa radio params — applied at lora_init time, no firmware rebuild needed.
+  lora_tx_power_dbm: 14
+  lora_sf: 9
+  lora_bw_hz: 125000
+  lora_cr: 5
 
 tests:
   # RSSI test: 1 s pacing between samples. SF7/BW125 air time for a 32B
@@ -14,5 +19,5 @@ tests:
     protocol: lora
     board: mkr_wan_1300
     repetitions: 100
-    inter_packet_us: 110000
+    inter_packet_us: 220000
     payload_sizes: [32]

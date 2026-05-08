@@ -68,9 +68,17 @@ static int lora_init(protocol_adapter_t *self, const adapter_config_t *cfg)
     s_lora.initialized = false;
     s_lora.last_rssi = 0;
 
+    /* Honour runtime overrides from the plan; fall back to compile-time
+     * defaults in config.h when the controller didn't set them. LDRO is
+     * auto-managed by the Sandeep LoRa lib inside setSignalBandwidth(). */
+    int      sf  = (cfg->lora_sf  != 0)            ? cfg->lora_sf  : LORA_SF;
+    long     bw  = (cfg->lora_bw_hz != 0)          ? (long)cfg->lora_bw_hz : (long)LORA_BW;
+    int      cr  = (cfg->lora_cr  != 0)            ? cfg->lora_cr  : LORA_CR;
+    int      pwr = (cfg->lora_tx_power_dbm != LORA_TX_POWER_UNSET)
+                       ? cfg->lora_tx_power_dbm : LORA_TX_POWER_DBM;
+
     platform_log("lora: begin freq=%ld SF=%d BW=%ld CR=4/%d pwr=%d dBm",
-                 (long)LORA_FREQUENCY, LORA_SF,
-                 (long)LORA_BW, LORA_CR, LORA_TX_POWER_DBM);
+                 (long)LORA_FREQUENCY, sf, bw, cr, pwr);
 
     /* The LoRa library's begin() handles MKR WAN 1300 internally:
      * defaults to SPI1 + SS=LORA_IRQ_DUMB, and pulses LORA_RESET with
@@ -80,12 +88,12 @@ static int lora_init(protocol_adapter_t *self, const adapter_config_t *cfg)
         return ADAPTER_ERR_INIT;
     }
 
-    LoRa.setSpreadingFactor(LORA_SF);
-    LoRa.setSignalBandwidth(LORA_BW);
-    LoRa.setCodingRate4(LORA_CR);
+    LoRa.setSpreadingFactor(sf);
+    LoRa.setSignalBandwidth(bw);
+    LoRa.setCodingRate4(cr);
     LoRa.setPreambleLength(LORA_PREAMBLE);
     LoRa.setSyncWord(LORA_SYNC_WORD);
-    LoRa.setTxPower(LORA_TX_POWER_DBM);
+    LoRa.setTxPower(pwr);
     LoRa.enableCrc();
 
     /* MKR WAN 1300 lacks LoRa.receive() (DIO0 not routed externally on this

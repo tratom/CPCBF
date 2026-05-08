@@ -8,6 +8,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from . import firmware_preflight
 from .agent_manager import AgentManager
 from .clock_sync import estimate_clock_offset
 from .models import HostInfo, TestMode, TestPlan, TestSpec
@@ -34,12 +35,14 @@ class Orchestrator:
         hosts: dict[str, HostInfo],
         output_dir: Path,
         rounds: int = 1,
+        flash: bool = False,
     ):
         self.plan = plan
         self.hosts = hosts
         self.output_dir = output_dir
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.rounds = rounds
+        self.flash = flash
 
     def _build_configure_params(
         self, test: TestSpec, payload_size: int, role: str, host_id: str
@@ -113,6 +116,15 @@ class Orchestrator:
                 "warmup": test.warmup,
                 "timeout_ms": test.timeout_ms,
                 "inter_packet_us": test.inter_packet_us,
+                # Runtime LoRa overrides — sourced from plan global/test config,
+                # applied in lora_init() (cpcbf/agent/platforms/arduino_mkr_wan1300
+                # /src/lora_adapter.cpp). Falling back to compile-time config.h
+                # would require omitting these keys; we always send explicit
+                # values so the firmware path is deterministic.
+                "lora_tx_power_dbm": test.lora_tx_power_dbm,
+                "lora_sf": test.lora_sf,
+                "lora_bw_hz": test.lora_bw_hz,
+                "lora_cr": test.lora_cr,
             }
 
         # MKR WiFi 1010: SoftAP topology (sender=AP, receiver=STA)
@@ -301,22 +313,57 @@ class Orchestrator:
                 logger.error("LoRa setup failed on receiver: %s", receiver_resp)
                 return None
         else:
-            # WiFi: sender (GO) first, then receiver (client) — sequential
+            # WiFi: sender (GO) first, then receiver (client) — sequential.
+            # Retry up to 3 times — NINA-W102 occasionally needs the AP to
+            # be torn down (WiFi.end via STOP) and re-started before the
+            # STA can find it; otherwise WiFi.begin sits for the full 30 s
+            # timeout and we'd lose the round.
+            WIFI_SETUP_MAX_RETRIES = 3
             setup_cmd = "WIFI_SETUP"
-            logger.info("Setting up Wi-Fi on sender (GO)...")
-            resp = manager.send(
-                sender_id, {"command": setup_cmd}, timeout=90.0
-            )
-            if resp.get("status") != "ok":
-                logger.error("WiFi setup failed on sender (GO): %s", resp)
-                return None
+            wifi_setup_ok = False
 
-            logger.info("Setting up Wi-Fi on receiver (client)...")
-            resp = manager.send(
-                receiver_id, {"command": setup_cmd}, timeout=90.0
-            )
-            if resp.get("status") != "ok":
-                logger.error("WiFi setup failed on receiver (client): %s", resp)
+            for attempt in range(WIFI_SETUP_MAX_RETRIES):
+                if attempt > 0:
+                    logger.warning(
+                        "WiFi setup attempt %d/%d — retrying after STOP...",
+                        attempt + 1, WIFI_SETUP_MAX_RETRIES,
+                    )
+                    for hid in host_ids:
+                        try:
+                            manager.send(hid, {"command": "STOP"}, timeout=5.0)
+                        except Exception:
+                            pass
+                    time.sleep(2)
+
+                logger.info("Setting up Wi-Fi on sender (GO)...")
+                sender_resp = manager.send(
+                    sender_id, {"command": setup_cmd}, timeout=90.0
+                )
+                if sender_resp.get("status") != "ok":
+                    logger.warning(
+                        "WiFi setup failed on sender (attempt %d): %s",
+                        attempt + 1, sender_resp,
+                    )
+                    continue
+
+                logger.info("Setting up Wi-Fi on receiver (client)...")
+                receiver_resp = manager.send(
+                    receiver_id, {"command": setup_cmd}, timeout=90.0
+                )
+                if receiver_resp.get("status") != "ok":
+                    logger.warning(
+                        "WiFi setup failed on receiver (attempt %d): %s",
+                        attempt + 1, receiver_resp,
+                    )
+                    continue
+
+                wifi_setup_ok = True
+                break
+
+            if not wifi_setup_ok:
+                logger.error(
+                    "WiFi setup failed after %d attempts", WIFI_SETUP_MAX_RETRIES
+                )
                 return None
 
         logger.info("%s link established, starting test...", test.protocol.upper())
@@ -438,6 +485,11 @@ class Orchestrator:
 
     def run(self) -> None:
         """Execute all tests in the plan."""
+        # Firmware marker check (and optional remote flash) MUST run before
+        # AgentManager opens the serial relay — flashing tears down the
+        # /dev/ttyACM_* node and a held port would block the re-enumerate.
+        firmware_preflight.run(self.hosts, self.plan, do_flash=self.flash)
+
         with AgentManager(self.hosts) as manager:
             # Deploy agent binaries
             for host_id in manager.host_ids:

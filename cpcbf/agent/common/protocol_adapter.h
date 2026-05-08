@@ -43,7 +43,17 @@ typedef struct {
     adapter_role_t role;
     topology_t topology;
     uint8_t ble_phy;       /* 1=1M, 2=2M PHY */
+
+    /* LoRa-only knobs. Sentinel values (see below) mean "use the compile-time
+     * default from config.h". Plumbed end-to-end so the YAML plan can change
+     * them without a reflash. */
+    int8_t   lora_tx_power_dbm; /* -127 = unset; valid range depends on chip/PA */
+    uint8_t  lora_sf;           /* 0 = unset; valid 6..12 */
+    uint32_t lora_bw_hz;        /* 0 = unset; e.g. 125000, 250000, 500000 */
+    uint8_t  lora_cr;           /* 0 = unset; coding-rate denominator 5..8 (4/5..4/8) */
 } adapter_config_t;
+
+#define LORA_TX_POWER_UNSET ((int8_t)-127)
 
 /* Forward declaration */
 typedef struct protocol_adapter protocol_adapter_t;

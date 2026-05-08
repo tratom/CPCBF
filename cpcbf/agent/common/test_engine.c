@@ -93,12 +93,21 @@ static inline void chunk_track(test_results_t *res, uint32_t total_expected,
 
 #if defined(CPCBF_ENABLE_RTT)
 
-/* Drain any buffered packets left over from a previous test. */
+/* Drain any buffered packets left over from a previous test.
+ *
+ * Why the per-recv timeout matters: with timeout=0 we only see what's
+ * already in the buffer. NINA / WAN radios deliver datagrams to the
+ * MCU asynchronously, so when we drain at the start of round N+1
+ * stragglers from round N's tail can land 1-100 ms later — past the
+ * non-blocking drain window — and read as the reply to ping seq=0,
+ * which then cascades into "expected K got K-1" mismatches for the
+ * rest of the run. 100 ms is plenty for any in-flight UDP/LoRa packet
+ * on a quiet link, and it's a one-time cost per test entry. */
 static void drain_rx(protocol_adapter_t *adapter)
 {
     uint8_t buf[BENCH_MAX_PAYLOAD + BENCH_OVERHEAD];
     size_t len = 0;
-    while (adapter->recv(adapter, buf, sizeof(buf), &len, 0) == ADAPTER_OK) {
+    while (adapter->recv(adapter, buf, sizeof(buf), &len, 100) == ADAPTER_OK) {
         len = 0;
     }
 }

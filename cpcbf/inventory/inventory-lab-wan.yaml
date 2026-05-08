@@ -12,6 +12,8 @@ hosts:
     serial_port: /dev/ttyACM_WAN
     serial_baud: 115200
     board_type: mkr_wan_1300
+    flasher_path: /home/pi/common-bench/cpcbf/field/firmware_flash.py
+    firmware_dir: /home/pi/common-bench/cpcbf/field/firmware
 
   mkr_wan_b:
     hostname: 192.168.8.21       # Bridge RPi B IP
@@ -21,3 +23,5 @@ hosts:
     serial_port: /dev/ttyACM_WAN
     serial_baud: 115200
     board_type: mkr_wan_1300
+    flasher_path: /home/pi/common-bench/cpcbf/field/firmware_flash.py
+    firmware_dir: /home/pi/common-bench/cpcbf/field/firmware

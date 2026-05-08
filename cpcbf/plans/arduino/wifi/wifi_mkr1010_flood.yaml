@@ -14,7 +14,7 @@ tests:
     mode: flood
     protocol: wifi
     board: mkr_wifi_1010
-    repetitions: 8000
+    repetitions: 10400
     inter_packet_us: 25000
     payload_sizes: [1432]
 

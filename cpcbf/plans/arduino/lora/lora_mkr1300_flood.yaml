@@ -4,6 +4,11 @@ global:
   warmup: 10
   timeout_ms: 10000
   cooldown_s: 15
+  # LoRa radio params — applied at lora_init time, no firmware rebuild needed.
+  lora_tx_power_dbm: 14
+  lora_sf: 9
+  lora_bw_hz: 125000
+  lora_cr: 5
 
 tests:
   # Throughput (flood) — back-to-back transmissions, naturally paced by

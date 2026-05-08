@@ -27,6 +27,15 @@ class GlobalConfig:
     cooldown_s: int = 5
     ble_phy: str = "1m"
     essid: str = ""
+    # LoRa knobs — defaults match cpcbf/agent/platforms/arduino_mkr_wan1300/
+    # src/config.h. Override per-plan to retune SF/BW/CR/Power without
+    # rebuilding firmware. LDRO is auto-managed by the Sandeep lib on the
+    # SX1276 (MKR WAN 1300) and will become a real knob once the LR1110
+    # (Seeed WM1110) adapter lands; not exposed yet.
+    lora_tx_power_dbm: int = 14
+    lora_sf: int = 7
+    lora_bw_hz: int = 125000
+    lora_cr: int = 5
 
 
 @dataclass
@@ -48,6 +57,11 @@ class TestSpec:
     cooldown_s: int = 5
     ble_phy: str = "1m"
     essid: str = ""
+    # LoRa knobs (mirrored from GlobalConfig). See GlobalConfig for context.
+    lora_tx_power_dbm: int = 14
+    lora_sf: int = 7
+    lora_bw_hz: int = 125000
+    lora_cr: int = 5
 
 
 @dataclass
@@ -65,6 +79,10 @@ class HostInfo:
     serial_port: str = ""           # e.g. "/dev/ttyACM0"
     serial_baud: int = 115200
     board_type: str = "rpi4"        # "rpi4", "mkr_wifi_1010", or "mkr_wan_1300"
+    # Where firmware_flash.py lives on the bridge RPi, and the dir holding
+    # the .bin files. Used by the orchestrator's firmware preflight (--flash).
+    flasher_path: str = ""
+    firmware_dir: str = ""
 
 
 @dataclass
@@ -74,3 +92,6 @@ class TestPlan:
     global_config: GlobalConfig
     tests: list[TestSpec]
     hosts: dict[str, HostInfo] = field(default_factory=dict)
+    # Top-level `firmware:` field — names the .bin (without extension) that
+    # MKR boards must be running. Checked by the orchestrator's preflight.
+    firmware: Optional[str] = None

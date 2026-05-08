@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import warnings
 import matplotlib.pyplot as plt
 import pandas as pd
 import seaborn as sns
+
+# Suppress pandas warning about raw DBAPI2 connections
+warnings.filterwarnings("ignore", category=UserWarning, message=".*pandas only supports SQLAlchemy connectable.*")
 
 from .db import get_connection
 

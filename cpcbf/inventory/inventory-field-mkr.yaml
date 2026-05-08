@@ -3,7 +3,7 @@
 
 hosts:
   mkr_a:
-    hostname: 192.168.8.20       # Bridge RPi A IP
+    hostname: 192.168.8.30       # Bridge RPi A IP
     username: pi
     password: raspberry
     transport: serial_bridge
@@ -15,7 +15,7 @@ hosts:
     firmware_dir: /home/pi/common-bench/cpcbf/field/firmware
 
   mkr_b:
-    hostname: 192.168.8.21       # Bridge RPi B IP
+    hostname: 192.168.8.31       # Bridge RPi B IP
     username: pi
     password: raspberry
     transport: serial_bridge

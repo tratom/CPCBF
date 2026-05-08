@@ -9,9 +9,13 @@ Usage: python -m cpcbf.analysis.run_analysis --experiment <name> [--output resul
 
 import argparse
 import sys
+import warnings
 from pathlib import Path
 
 import pandas as pd
+
+# Suppress pandas warning about raw DBAPI2 connections
+warnings.filterwarnings("ignore", category=UserWarning, message=".*pandas only supports SQLAlchemy connectable.*")
 
 from .stats import compute_all_stats
 from .compare import comparison_table

@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+import warnings
 import numpy as np
 import pandas as pd
 from scipy import stats
+
+# Suppress pandas warning about raw DBAPI2 connections
+warnings.filterwarnings("ignore", category=UserWarning, message=".*pandas only supports SQLAlchemy connectable.*")
 
 from .db import get_connection
 

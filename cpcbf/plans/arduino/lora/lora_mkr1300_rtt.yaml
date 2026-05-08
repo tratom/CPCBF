@@ -4,6 +4,13 @@ global:
   warmup: 10
   timeout_ms: 5000
   cooldown_s: 15
+  # LoRa radio params — applied at lora_init time, no firmware rebuild needed.
+  # LDRO is auto-managed by the SX1276 driver based on symbol duration
+  # (turns on when SF/BW combination produces symbol time > 16 ms).
+  lora_tx_power_dbm: 14   # PA_BOOST range -4..+15 on MKR WAN 1300; lower for lab
+  lora_sf: 9              # spreading factor 6..12 (7 = fastest)
+  lora_bw_hz: 125000      # bandwidth in Hz (125000 / 250000 / 500000)
+  lora_cr: 5              # coding-rate denominator 5..8 (5 = 4/5)
 
 tests:
   # RTT ping-pong: 2 s pacing between pings. Full round-trip at SF7/BW125
@@ -14,6 +21,6 @@ tests:
     mode: ping_pong
     protocol: lora
     board: mkr_wan_1300
-    repetitions: 150
-    inter_packet_us: 2000000
+    repetitions: 300
+    inter_packet_us: 220000
     payload_sizes: [32]

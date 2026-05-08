@@ -129,10 +129,21 @@ results/
 
 ### Quick analysis without DB (standalone)
 
-For quick checks without PostgreSQL, use `stats_from_json.py` directly on JSONL files:
+For quick checks without PostgreSQL, use `stats_from_json.py`. It supports protocol grouping and optional merging of field results, with an output format that mirrors `run_analysis.py`.
+
+| Flag | Required | Description |
+|------|----------|-------------|
+| `path` | yes | JSONL file or directory containing .jsonl files |
+| `--merge` | no | Merge split field result files (`*_sender.jsonl`/`*_receiver.jsonl`) before analysis |
+| `--protocol` | no | Filter by protocol (`wifi`, `ble`, ...). Default: all protocols |
+| `--output` | no | Output path for merged JSONL (if using `--merge`). Default: `results/results.jsonl` |
 
 ```bash
+# Analyze already merged or single-file results
 python cpcbf/analysis/stats_from_json.py results/
+
+# Merge split field results and analyze
+python cpcbf/analysis/stats_from_json.py field_results/ --merge --output results/merged.jsonl
 ```
 
 ## Schema
