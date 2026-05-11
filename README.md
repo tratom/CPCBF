@@ -141,6 +141,9 @@ Flags:
 - `-i` — path to inventory file
 - `-o` — output directory (default: `./results`)
 - `-v` — verbose logging
+- `-r` — number of round (default 1)
+- `-F` — automatically flash the firmware specified in the plan file (for the arduino boards)
+
 
 ### What happens during a test
 
